@@ -32,7 +32,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 
 | Feature | OPL1 | OPL2 | OPL3 |
 | --- | --- | --- | --- |
-| Chip clock/timer constants and sample rate conversion | [ ] | [ ] | [ ] |
+| Chip clock/timer constants and sample rate conversion | [x] | [x] | [x] |
 | Register map with write side-effects | [ ] | [ ] | [ ] |
 | Operator envelopes (attack/decay/sustain/release) | [ ] | [ ] | [ ] |
 | Waveform selection | [ ] | [ ] | [ ] |

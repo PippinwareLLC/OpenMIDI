@@ -3,7 +3,7 @@
 Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 
 ## Foundations
-- [ ] Define chip clock/timer constants for OPL1/OPL2/OPL3 and sample rate conversion.
+- [x] Define chip clock/timer constants for OPL1/OPL2/OPL3 and sample rate conversion.
 - [ ] Implement full OPL register maps with correct bit masking and write side-effects.
 - [ ] Add deterministic reset/power-on state and register defaults.
 
@@ -34,4 +34,3 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [ ] Register-level golden tests against a reference emulator (eg. Nuked OPL3).
 - [ ] MIDI playback parity tests using known reference recordings.
 - [ ] Performance validation for real-time playback at 44.1/48 kHz.
-
