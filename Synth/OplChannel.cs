@@ -40,11 +40,19 @@ public sealed class OplChannel
         FNum = (FNum & 0x300) | value;
     }
 
-    public void ApplyBlockKeyOn(byte value)
+    public void ApplyBlockKeyOn(byte value, bool updateKeyOn = true)
     {
         FNum = (FNum & 0xFF) | ((value & 0x03) << 8);
         Block = (value >> 2) & 0x07;
-        KeyOn = (value & 0x20) != 0;
+        if (updateKeyOn)
+        {
+            KeyOn = (value & 0x20) != 0;
+        }
+    }
+
+    public void SetKeyOn(bool keyOn)
+    {
+        KeyOn = keyOn;
     }
 
     public void ApplyFeedbackConnection(byte value)

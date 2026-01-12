@@ -20,6 +20,19 @@ public sealed class OplCore
         -1, -1, -1, -1, -1, -1, -1, -1
     };
 
+    private const byte RhythmFlagHh = 0x01;
+    private const byte RhythmFlagTc = 0x02;
+    private const byte RhythmFlagTom = 0x04;
+    private const byte RhythmFlagSd = 0x08;
+    private const byte RhythmFlagBd = 0x10;
+
+    private const int RhythmOpBdMod = 12;
+    private const int RhythmOpBdCar = 15;
+    private const int RhythmOpHh = 13;
+    private const int RhythmOpSd = 16;
+    private const int RhythmOpTom = 14;
+    private const int RhythmOpTc = 17;
+
     private const float DefaultModulationIndex = 1.0f;
     private const double TwoPi = Math.PI * 2.0;
     private static readonly int[] KeyScaleLevelTable = { 0, 24, 32, 37, 40, 43, 45, 47, 48, 50, 51, 52, 53, 54, 55, 56 };
@@ -119,9 +132,17 @@ public sealed class OplCore
     public void WriteRegister(int address, byte value)
     {
         bool resetStatus = address == 0x04 && (value & 0x80) != 0;
+        bool updateRhythm = address == 0xBD;
+        bool prevRhythmEnabled = updateRhythm && Registers.RhythmEnabled;
+        byte prevRhythmFlags = updateRhythm ? Registers.RhythmFlags : (byte)0;
 
         Registers.Write(address, value);
         ApplyRegisterWrite(address, value);
+
+        if (updateRhythm)
+        {
+            UpdateRhythmState(prevRhythmEnabled, prevRhythmFlags);
+        }
 
         if (resetStatus)
         {
@@ -229,10 +250,30 @@ public sealed class OplCore
 
             float left = 0f;
             float right = 0f;
+            float noiseSample = (_noiseLfsr & 0x01) != 0 ? 1f : -1f;
 
             for (int channelIndex = 0; channelIndex < _channels.Length; channelIndex++)
             {
                 OplChannel channel = _channels[channelIndex];
+                if (IsRhythmChannel(channelIndex))
+                {
+                    float rhythmSample = RenderRhythmChannel(channelIndex, outputSampleRate, noiseSample);
+                    bool rhythmLeftOn = channel.LeftEnable || (!channel.LeftEnable && !channel.RightEnable);
+                    bool rhythmRightOn = channel.RightEnable || (!channel.LeftEnable && !channel.RightEnable);
+
+                    if (rhythmLeftOn)
+                    {
+                        left += rhythmSample;
+                    }
+
+                    if (rhythmRightOn)
+                    {
+                        right += rhythmSample;
+                    }
+
+                    continue;
+                }
+
                 int modIndex = channel.ModulatorIndex;
                 int carIndex = channel.CarrierIndex;
                 if (modIndex < 0 || modIndex >= _operators.Length || carIndex < 0 || carIndex >= _operators.Length)
@@ -265,6 +306,80 @@ public sealed class OplCore
             interleaved[offset + i * 2] = Math.Clamp(left, -1f, 1f);
             interleaved[offset + i * 2 + 1] = Math.Clamp(right, -1f, 1f);
         }
+    }
+
+    private bool IsRhythmChannel(int channelIndex)
+    {
+        return Registers.RhythmEnabled && channelIndex >= 6 && channelIndex < 9;
+    }
+
+    private float RenderRhythmChannel(int channelIndex, int outputSampleRate, float noiseSample)
+    {
+        float sample = 0f;
+        int local = channelIndex % 9;
+        OplChannel channel = _channels[channelIndex];
+
+        if (local == 6)
+        {
+            int modIndex = channel.ModulatorIndex;
+            int carIndex = channel.CarrierIndex;
+            if (modIndex >= 0 && modIndex < _operators.Length && carIndex >= 0 && carIndex < _operators.Length)
+            {
+                OplOperator mod = _operators[modIndex];
+                OplOperator car = _operators[carIndex];
+
+                float modOutput = RenderOperator(mod, channel, outputSampleRate, 0f, channel.Feedback, applyFeedback: true);
+                float carrierPhaseMod = channel.Additive ? 0f : modOutput * DefaultModulationIndex;
+                float carOutput = RenderOperator(car, channel, outputSampleRate, carrierPhaseMod, 0, applyFeedback: false);
+                sample += channel.Additive ? modOutput + carOutput : carOutput;
+            }
+        }
+        else if (local == 7)
+        {
+            sample += RenderNoiseOperator(RhythmOpHh, channel, noiseSample);
+            sample += RenderNoiseOperator(RhythmOpSd, channel, noiseSample);
+        }
+        else if (local == 8)
+        {
+            sample += RenderSingleOperator(RhythmOpTom, channel, outputSampleRate);
+            sample += RenderNoiseOperator(RhythmOpTc, channel, noiseSample);
+        }
+
+        return sample;
+    }
+
+    private float RenderSingleOperator(int opIndex, OplChannel channel, int outputSampleRate)
+    {
+        if (opIndex < 0 || opIndex >= _operators.Length)
+        {
+            return 0f;
+        }
+
+        return RenderOperator(_operators[opIndex], channel, outputSampleRate, 0f, 0, applyFeedback: false);
+    }
+
+    private float RenderNoiseOperator(int opIndex, OplChannel channel, float noiseSample)
+    {
+        if (opIndex < 0 || opIndex >= _operators.Length)
+        {
+            return 0f;
+        }
+
+        OplOperator op = _operators[opIndex];
+        int attenuation = ComputeOperatorAttenuation(op, channel);
+        if (attenuation >= 0x3FF)
+        {
+            op.PreviousOutput = op.LastOutput;
+            op.LastOutput = 0f;
+            return 0f;
+        }
+
+        uint totalAtten = (uint)attenuation << 2;
+        int volume = OplWaveformTables.AttenuationToVolume(totalAtten);
+        float output = noiseSample * (volume / 8192f);
+        op.PreviousOutput = op.LastOutput;
+        op.LastOutput = output;
+        return output;
     }
 
     private void StepTimers(double seconds)
@@ -364,10 +479,12 @@ public sealed class OplCore
             if (channelIndex >= 0)
             {
                 OplChannel channel = _channels[channelIndex];
+                bool isRhythmChannel = Registers.RhythmEnabled && bank == 0 && (channelIndex % 9) >= 6;
+                bool updateKeyOn = !isRhythmChannel;
                 bool wasKeyOn = channel.KeyOn;
-                channel.ApplyBlockKeyOn(value);
+                channel.ApplyBlockKeyOn(value, updateKeyOn);
                 UpdateChannelKeyCode(channel);
-                if (channel.KeyOn != wasKeyOn)
+                if (updateKeyOn && channel.KeyOn != wasKeyOn)
                 {
                     SetChannelKeyOn(channel, channel.KeyOn);
                 }
@@ -443,6 +560,92 @@ public sealed class OplCore
         else
         {
             op.Envelope.KeyOff();
+        }
+    }
+
+    private void UpdateRhythmState(bool wasEnabled, byte previousFlags)
+    {
+        bool enabled = Registers.RhythmEnabled;
+        byte flags = Registers.RhythmFlags;
+
+        if (enabled)
+        {
+            if (!wasEnabled)
+            {
+                for (int local = 6; local <= 8; local++)
+                {
+                    int channelIndex = local;
+                    if (channelIndex >= _channels.Length)
+                    {
+                        break;
+                    }
+
+                    OplChannel channel = _channels[channelIndex];
+                    if (channel.KeyOn)
+                    {
+                        SetChannelKeyOn(channel, false);
+                        channel.SetKeyOn(false);
+                    }
+                }
+            }
+
+            UpdateRhythmFlags(previousFlags, flags);
+        }
+        else if (wasEnabled)
+        {
+            UpdateRhythmFlags(previousFlags, 0);
+            SyncRhythmChannelsFromRegisters();
+        }
+    }
+
+    private void UpdateRhythmFlags(byte previousFlags, byte newFlags)
+    {
+        UpdateRhythmFlag(previousFlags, newFlags, RhythmFlagBd, RhythmOpBdMod, RhythmOpBdCar);
+        UpdateRhythmFlag(previousFlags, newFlags, RhythmFlagSd, RhythmOpSd);
+        UpdateRhythmFlag(previousFlags, newFlags, RhythmFlagTom, RhythmOpTom);
+        UpdateRhythmFlag(previousFlags, newFlags, RhythmFlagTc, RhythmOpTc);
+        UpdateRhythmFlag(previousFlags, newFlags, RhythmFlagHh, RhythmOpHh);
+    }
+
+    private void UpdateRhythmFlag(byte previousFlags, byte newFlags, byte mask, params int[] operatorIndices)
+    {
+        bool wasOn = (previousFlags & mask) != 0;
+        bool isOn = (newFlags & mask) != 0;
+        if (wasOn == isOn)
+        {
+            return;
+        }
+
+        foreach (int opIndex in operatorIndices)
+        {
+            if (opIndex < 0 || opIndex >= _operators.Length)
+            {
+                continue;
+            }
+
+            UpdateOperatorKey(_operators[opIndex], isOn);
+        }
+    }
+
+    private void SyncRhythmChannelsFromRegisters()
+    {
+        for (int local = 6; local <= 8; local++)
+        {
+            int channelIndex = local;
+            if (channelIndex >= _channels.Length)
+            {
+                break;
+            }
+
+            OplChannel channel = _channels[channelIndex];
+            bool wasKeyOn = channel.KeyOn;
+            int reg = 0xB0 + local;
+            channel.ApplyBlockKeyOn(Registers.Read(reg), updateKeyOn: true);
+            UpdateChannelKeyCode(channel);
+            if (channel.KeyOn != wasKeyOn)
+            {
+                SetChannelKeyOn(channel, channel.KeyOn);
+            }
         }
     }
 

@@ -15,6 +15,9 @@ OPL core render path with a default 2-op patch while instrument mapping is expan
 - The SDL example renders a live console VU/channel activity view during playback.
 - Log-sine waveform tables and key scale attenuation are now in use.
 - Tremolo and vibrato LFOs are implemented with depth control.
+- OPL rhythm mode and percussion channels (BD/SD/TT/CY/HH) are implemented.
+- Sustain pedal (CC64) is mapped to hold/release OPL voices.
+- Reference render clip tests cover the OPL core output.
 
 ## Quickstart
 Build everything:
@@ -47,12 +50,13 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Waveform selection | [x] | [x] | [x] |
 | Tremolo/vibrato LFOs | [x] | [x] | [x] |
 | 2-operator algorithms and feedback | [x] | [x] | [x] |
-| Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [ ] | [ ] |
+| Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [x] | [x] |
 | 4-operator channel pairing | [ ] | [ ] | [ ] |
 | Stereo output routing | [ ] | [ ] | [x] |
 | MIDI instrument bank mapping | [ ] | [ ] | [ ] |
 | MIDI percussion mapping | [ ] | [ ] | [ ] |
-| Pitch bend and controller mapping | [ ] | [ ] | [ ] |
+| Pitch bend and controller mapping (volume/expression/pan/sustain) | [x] | [x] | [x] |
+| Mod wheel/vibrato controller mapping | [ ] | [ ] | [ ] |
 | Envelope rate table validation (ymfm) | [x] | [x] | [x] |
 | Register-level verification vs reference core | [ ] | [ ] | [ ] |
 

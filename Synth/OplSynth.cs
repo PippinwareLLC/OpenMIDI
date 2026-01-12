@@ -12,6 +12,7 @@ public sealed class OplSynth : IMidiSynth
     {
         public bool Active;
         public bool KeyOn;
+        public bool Sustained;
         public int MidiChannel;
         public int Note;
         public int Velocity;
@@ -26,6 +27,7 @@ public sealed class OplSynth : IMidiSynth
         public int Volume = 100;
         public int Expression = 127;
         public int Pan = 64;
+        public bool SustainPedal;
     }
 
     private readonly OplVoice[] _voices;
@@ -94,6 +96,7 @@ public sealed class OplSynth : IMidiSynth
         {
             voice.Active = false;
             voice.KeyOn = false;
+            voice.Sustained = false;
             voice.MidiChannel = 0;
             voice.Note = 0;
             voice.Velocity = 0;
@@ -108,6 +111,7 @@ public sealed class OplSynth : IMidiSynth
             channel.Volume = 100;
             channel.Expression = 127;
             channel.Pan = 64;
+            channel.SustainPedal = false;
         }
 
         _ageCounter = 0;
@@ -142,6 +146,7 @@ public sealed class OplSynth : IMidiSynth
         OplVoice voice = _voices[voiceIndex];
         voice.Active = true;
         voice.KeyOn = true;
+        voice.Sustained = false;
         voice.MidiChannel = channel;
         voice.Note = note;
         voice.Velocity = velocity;
@@ -158,10 +163,17 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        MidiChannelState channelState = _channels[channel];
         foreach (OplVoice voice in _voices)
         {
             if (voice.Active && voice.MidiChannel == channel && voice.Note == note)
             {
+                if (channelState.SustainPedal)
+                {
+                    voice.Sustained = true;
+                    continue;
+                }
+
                 KeyOffVoice(voice);
             }
         }
@@ -188,6 +200,9 @@ public sealed class OplSynth : IMidiSynth
             case 11:
                 channelState.Expression = value;
                 UpdateChannelGains(channel, channelState);
+                break;
+            case 64:
+                UpdateSustainPedal(channel, channelState, value >= 64);
                 break;
             case 120:
             case 123:
@@ -277,6 +292,7 @@ public sealed class OplSynth : IMidiSynth
         {
             _voices[reuseIndex].Active = false;
             _voices[reuseIndex].KeyOn = false;
+            _voices[reuseIndex].Sustained = false;
             return reuseIndex;
         }
 
@@ -284,6 +300,7 @@ public sealed class OplSynth : IMidiSynth
         KeyOffVoice(_voices[stealIndex]);
         _voices[stealIndex].Active = false;
         _voices[stealIndex].KeyOn = false;
+        _voices[stealIndex].Sustained = false;
         return stealIndex;
     }
 
@@ -292,7 +309,7 @@ public sealed class OplSynth : IMidiSynth
         for (int i = 0; i < _voices.Length; i++)
         {
             OplVoice voice = _voices[i];
-            if (!voice.Active || voice.KeyOn)
+            if (!voice.Active || voice.KeyOn || voice.Sustained)
             {
                 continue;
             }
@@ -311,6 +328,7 @@ public sealed class OplSynth : IMidiSynth
         int bestIndex = 0;
         float bestLevel = float.MaxValue;
         bool bestIsRelease = false;
+        bool bestIsSustained = true;
 
         for (int i = 0; i < _voices.Length; i++)
         {
@@ -326,6 +344,20 @@ public sealed class OplSynth : IMidiSynth
             }
 
             bool isRelease = !voice.KeyOn || isOff;
+            bool isSustained = voice.Sustained;
+            if (isSustained != bestIsSustained)
+            {
+                if (!isSustained)
+                {
+                    bestIsSustained = false;
+                    bestIsRelease = isRelease;
+                    bestLevel = level;
+                    bestIndex = i;
+                }
+
+                continue;
+            }
+
             if (isRelease && !bestIsRelease)
             {
                 bestIsRelease = true;
@@ -355,6 +387,33 @@ public sealed class OplSynth : IMidiSynth
             {
                 KeyOffVoice(voice);
             }
+        }
+    }
+
+    private void UpdateSustainPedal(int channel, MidiChannelState channelState, bool enabled)
+    {
+        if (channelState.SustainPedal == enabled)
+        {
+            return;
+        }
+
+        channelState.SustainPedal = enabled;
+        if (!enabled)
+        {
+            ReleaseSustainedVoices(channel);
+        }
+    }
+
+    private void ReleaseSustainedVoices(int channel)
+    {
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || voice.MidiChannel != channel || !voice.Sustained)
+            {
+                continue;
+            }
+
+            KeyOffVoice(voice);
         }
     }
 
@@ -410,6 +469,7 @@ public sealed class OplSynth : IMidiSynth
                 {
                     voice.Active = false;
                     voice.KeyOn = false;
+                    voice.Sustained = false;
                     continue;
                 }
 
@@ -580,6 +640,7 @@ public sealed class OplSynth : IMidiSynth
         }
 
         voice.KeyOn = false;
+        voice.Sustained = false;
 
         int oplChannel = voice.OplChannel;
         if (oplChannel >= 0 && oplChannel < Core.Channels.Count)

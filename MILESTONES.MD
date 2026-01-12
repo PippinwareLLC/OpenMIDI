@@ -17,7 +17,7 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 
 ## Channel Algorithms
 - [x] 2-operator algorithms (FM/AM) with feedback.
-- [ ] Rhythm mode (BD/SD/TT/CY/HH) with proper operator routing.
+- [x] Rhythm mode (BD/SD/TT/CY/HH) with percussion operator routing.
 - [ ] OPL3 4-operator channel pairing and algorithm selection.
 - [x] OPL3 stereo output routing (left/right enable per channel).
 
@@ -25,8 +25,10 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [ ] Instrument bank format for OPL patches (operators + algorithm + feedback).
 - [ ] Default GM/Adlib-style patch bank for MIDI program changes.
 - [ ] Channel 10 percussion mapping to OPL rhythm mode.
-- [ ] Controller mapping (volume, expression, pan, mod wheel, sustain).
-- [ ] Pitch bend and optional portamento/glide behavior.
+- [x] Controller mapping (volume, expression, pan, sustain).
+- [ ] Mod wheel/vibrato controller mapping.
+- [x] Pitch bend mapping (configurable range).
+- [ ] Optional portamento/glide behavior.
 
 ## Output + Mixing
 - [ ] Accurate output scaling, clipping, and DC offset handling.
@@ -34,6 +36,7 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 
 ## Verification
 - [x] Envelope rate table validation against ymfm reference data.
+- [x] Reference render clip tests for OPL core output.
 - [ ] Register-level golden tests against a reference emulator (eg. Nuked OPL3).
 - [ ] MIDI playback parity tests using known reference recordings.
 - [ ] Performance validation for real-time playback at 44.1/48 kHz.
