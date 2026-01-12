@@ -1,0 +1,6 @@
+ReferenceAssets/**
+
+# .NET build outputs
+bin/
+obj/
+.vs/
