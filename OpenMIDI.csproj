@@ -11,6 +11,10 @@
     <Content Remove="OpenMIDI.Example/**" />
     <EmbeddedResource Remove="OpenMIDI.Example/**" />
     <None Remove="OpenMIDI.Example/**" />
+    <Compile Remove="tests/**" />
+    <Content Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+    <None Remove="tests/**" />
   </ItemGroup>
 
 </Project>
