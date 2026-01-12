@@ -6,11 +6,12 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [x] Define chip clock/timer constants for OPL1/OPL2/OPL3 and sample rate conversion.
 - [x] Implement full OPL register maps with correct bit masking and write side-effects.
 - [x] Implement OPL timer A/B counters with IRQ status tracking.
+- [x] Drive operator/channel state from OPL register writes.
 - [ ] Add deterministic reset/power-on state and register defaults.
 
 ## Operator Engine
 - [ ] Oscillator core with phase accumulation and waveform selection.
-- [ ] Envelope generator with attack/decay/sustain/release rate tables.
+- [x] Envelope generator with attack/decay/sustain/release rate tables.
 - [ ] Key scaling level (KSL) and key scaling rate (KSR).
 - [ ] Tremolo and vibrato LFOs with depth/rate control.
 

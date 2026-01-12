@@ -11,6 +11,7 @@ to validate the MIDI timing and PCM output pipeline while the OPL core is built.
 - An OPL register map with timer/control/rhythm side-effects is defined.
 - An OPL core scaffold tracks register writes and timer counters for future operator wiring.
 - The SDL example renders a live console VU/channel activity view during playback.
+- OPL operator/channel structs now track register values and envelope state.
 
 ## Quickstart
 Build everything:
@@ -38,7 +39,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Chip clock/timer constants and sample rate conversion | [x] | [x] | [x] |
 | Register map with write side-effects | [x] | [x] | [x] |
 | Timer A/B counters and IRQ status | [x] | [x] | [x] |
-| Operator envelopes (attack/decay/sustain/release) | [ ] | [ ] | [ ] |
+| Operator envelopes (attack/decay/sustain/release) | [x] | [x] | [x] |
 | Waveform selection | [ ] | [ ] | [ ] |
 | Tremolo/vibrato LFOs | [ ] | [ ] | [ ] |
 | 2-operator algorithms and feedback | [ ] | [ ] | [ ] |
