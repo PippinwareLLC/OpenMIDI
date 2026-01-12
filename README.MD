@@ -9,9 +9,11 @@ to validate the MIDI timing and PCM output pipeline while the OPL core is built.
 - A placeholder synth produces PCM output for validation.
 - An SDL example host plays a bundled sample MIDI file.
 - An OPL register map with timer/control/rhythm side-effects is defined.
-- An OPL core scaffold tracks register writes and timer counters for future operator wiring.
+- The OPL core tracks register writes, timer counters, operator envelopes, and keycode scaling.
+- A 2-operator render path now drives phase accumulation, waveform selection, and feedback mixing.
+- Envelope rate tables are aligned with the ymfm reference and validated by tests.
 - The SDL example renders a live console VU/channel activity view during playback.
-- OPL operator/channel structs now track register values and envelope state.
+- Waveform shapes are currently approximations pending log-sine tables.
 
 ## Quickstart
 Build everything:
@@ -40,15 +42,16 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Register map with write side-effects | [x] | [x] | [x] |
 | Timer A/B counters and IRQ status | [x] | [x] | [x] |
 | Operator envelopes (attack/decay/sustain/release) | [x] | [x] | [x] |
-| Waveform selection | [ ] | [ ] | [ ] |
+| Waveform selection | [x] | [x] | [x] |
 | Tremolo/vibrato LFOs | [ ] | [ ] | [ ] |
-| 2-operator algorithms and feedback | [ ] | [ ] | [ ] |
+| 2-operator algorithms and feedback | [x] | [x] | [x] |
 | Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [ ] | [ ] |
 | 4-operator channel pairing | [ ] | [ ] | [ ] |
-| Stereo output routing | [ ] | [ ] | [ ] |
+| Stereo output routing | [ ] | [ ] | [x] |
 | MIDI instrument bank mapping | [ ] | [ ] | [ ] |
 | MIDI percussion mapping | [ ] | [ ] | [ ] |
 | Pitch bend and controller mapping | [ ] | [ ] | [ ] |
+| Envelope rate table validation (ymfm) | [x] | [x] | [x] |
 | Register-level verification vs reference core | [ ] | [ ] | [ ] |
 
 ## License

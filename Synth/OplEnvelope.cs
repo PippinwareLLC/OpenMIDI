@@ -11,20 +11,20 @@ public enum OplEnvelopeStage
 
 public sealed class OplEnvelope
 {
-    private const double MinAttackSeconds = 0.002;
-    private const double MaxAttackSeconds = 4.0;
-    private const double MinDecaySeconds = 0.01;
-    private const double MaxDecaySeconds = 8.0;
-    private const double MinReleaseSeconds = 0.01;
-    private const double MaxReleaseSeconds = 8.0;
+    private const int MaxAttenuation = 0x3FF;
 
-    private double _attackSeconds = MaxAttackSeconds;
-    private double _decaySeconds = MaxDecaySeconds;
-    private double _releaseSeconds = MaxReleaseSeconds;
-    private float _sustainLevel = 1f;
+    private int _sustainAttenuation;
+    private int _effectiveAttackRate;
+    private int _effectiveDecayRate;
+    private int _effectiveSustainRate;
+    private int _effectiveReleaseRate;
+    private bool _sustainEnabled;
+    private bool _keyScaleRate;
+    private int _keyCode;
 
     public OplEnvelopeStage Stage { get; private set; } = OplEnvelopeStage.Off;
     public float Level { get; private set; }
+    public int Attenuation { get; private set; } = MaxAttenuation;
     public int AttackRate { get; private set; }
     public int DecayRate { get; private set; }
     public int SustainLevel { get; private set; }
@@ -33,27 +33,38 @@ public sealed class OplEnvelope
     public void Reset()
     {
         Stage = OplEnvelopeStage.Off;
+        Attenuation = MaxAttenuation;
         Level = 0f;
-        SetRates(0, 0, 0, 0);
+        Configure(0, 0, 0, 0, sustainEnabled: false, keyScaleRate: false, keyCode: 0);
     }
 
-    public void SetRates(int attackRate, int decayRate, int sustainLevel, int releaseRate)
+    public void Configure(int attackRate, int decayRate, int sustainLevel, int releaseRate, bool sustainEnabled, bool keyScaleRate, int keyCode)
     {
         AttackRate = ClampRate(attackRate);
         DecayRate = ClampRate(decayRate);
         SustainLevel = ClampRate(sustainLevel);
         ReleaseRate = ClampRate(releaseRate);
-
-        _attackSeconds = MapRateSeconds(AttackRate, MinAttackSeconds, MaxAttackSeconds);
-        _decaySeconds = MapRateSeconds(DecayRate, MinDecaySeconds, MaxDecaySeconds);
-        _releaseSeconds = MapRateSeconds(ReleaseRate, MinReleaseSeconds, MaxReleaseSeconds);
-        _sustainLevel = 1f - SustainLevel / 15f;
+        _sustainEnabled = sustainEnabled;
+        _keyScaleRate = keyScaleRate;
+        _keyCode = Math.Clamp(keyCode, 0, 15);
+        UpdateEffectiveRates();
     }
 
     public void KeyOn()
     {
+        bool wasSilent = Stage is OplEnvelopeStage.Off or OplEnvelopeStage.Release;
         Stage = OplEnvelopeStage.Attack;
-        Level = 0f;
+        if (wasSilent)
+        {
+            Attenuation = MaxAttenuation;
+        }
+
+        if (_effectiveAttackRate >= 62)
+        {
+            Attenuation = 0;
+        }
+
+        UpdateLevel();
     }
 
     public void KeyOff()
@@ -66,82 +77,71 @@ public sealed class OplEnvelope
         Stage = OplEnvelopeStage.Release;
     }
 
-    public void Step(double seconds)
+    public void Step(uint envCounter)
     {
-        if (seconds <= 0)
+        if (Stage == OplEnvelopeStage.Off)
         {
+            Attenuation = MaxAttenuation;
+            Level = 0f;
             return;
         }
 
-        switch (Stage)
+        if (Stage == OplEnvelopeStage.Attack && Attenuation <= 0)
         {
-            case OplEnvelopeStage.Off:
-                Level = 0f;
-                break;
-            case OplEnvelopeStage.Attack:
-                StepAttack(seconds);
-                break;
-            case OplEnvelopeStage.Decay:
-                StepDecay(seconds);
-                break;
-            case OplEnvelopeStage.Sustain:
-                Level = _sustainLevel;
-                break;
-            case OplEnvelopeStage.Release:
-                StepRelease(seconds);
-                break;
-        }
-    }
-
-    private void StepAttack(double seconds)
-    {
-        if (_attackSeconds <= 0)
-        {
-            Level = 1f;
-            Stage = OplEnvelopeStage.Decay;
-            return;
-        }
-
-        Level += (float)(seconds / _attackSeconds);
-        if (Level >= 1f)
-        {
-            Level = 1f;
             Stage = OplEnvelopeStage.Decay;
         }
-    }
 
-    private void StepDecay(double seconds)
-    {
-        if (_decaySeconds <= 0)
+        if (Stage == OplEnvelopeStage.Decay && Attenuation >= _sustainAttenuation)
         {
-            Level = _sustainLevel;
             Stage = OplEnvelopeStage.Sustain;
+        }
+
+        int rate = Stage switch
+        {
+            OplEnvelopeStage.Attack => _effectiveAttackRate,
+            OplEnvelopeStage.Decay => _effectiveDecayRate,
+            OplEnvelopeStage.Sustain => _effectiveSustainRate,
+            OplEnvelopeStage.Release => _effectiveReleaseRate,
+            _ => 0
+        };
+
+        int rateShift = rate >> 2;
+        uint shiftedCounter = envCounter << rateShift;
+        if ((shiftedCounter & 0x7FF) != 0)
+        {
+            UpdateLevel();
             return;
         }
 
-        Level -= (float)(seconds / _decaySeconds);
-        if (Level <= _sustainLevel)
-        {
-            Level = _sustainLevel;
-            Stage = OplEnvelopeStage.Sustain;
-        }
-    }
+        int relevantBits = (int)((shiftedCounter >> (rateShift <= 11 ? 11 : rateShift)) & 0x07);
+        int increment = (int)OplEnvelopeTables.GetAttenuationIncrement(rate, relevantBits);
 
-    private void StepRelease(double seconds)
-    {
-        if (_releaseSeconds <= 0)
+        if (Stage == OplEnvelopeStage.Attack)
         {
-            Level = 0f;
-            Stage = OplEnvelopeStage.Off;
-            return;
+            if (rate < 62)
+            {
+                Attenuation += (~Attenuation * increment) >> 4;
+                if (Attenuation < 0)
+                {
+                    Attenuation = 0;
+                }
+            }
+        }
+        else
+        {
+            Attenuation += increment;
+            if (Attenuation >= 0x400)
+            {
+                Attenuation = MaxAttenuation;
+            }
         }
 
-        Level -= (float)(seconds / _releaseSeconds);
-        if (Level <= 0f)
+        if (Stage == OplEnvelopeStage.Release && Attenuation >= MaxAttenuation)
         {
-            Level = 0f;
             Stage = OplEnvelopeStage.Off;
         }
+
+        UpdateLevel();
     }
 
     private static int ClampRate(int rate)
@@ -149,19 +149,34 @@ public sealed class OplEnvelope
         return Math.Clamp(rate, 0, 15);
     }
 
-    private static double MapRateSeconds(int rate, double min, double max)
+    private void UpdateEffectiveRates()
     {
-        if (rate <= 0)
+        int shift = _keyScaleRate ? 0 : 2;
+        int ksrValue = _keyCode >> shift;
+        _effectiveAttackRate = EffectiveRate(AttackRate * 4, ksrValue);
+        _effectiveDecayRate = EffectiveRate(DecayRate * 4, ksrValue);
+        _effectiveSustainRate = _sustainEnabled ? 0 : EffectiveRate(ReleaseRate * 4, ksrValue);
+        _effectiveReleaseRate = EffectiveRate(ReleaseRate * 4, ksrValue);
+
+        int sustain = SustainLevel;
+        sustain |= (sustain + 1) & 0x10;
+        _sustainAttenuation = sustain << 5;
+    }
+
+    private static int EffectiveRate(int rawRate, int ksrValue)
+    {
+        if (rawRate == 0)
         {
-            return max;
+            return 0;
         }
 
-        if (rate >= 15)
-        {
-            return min;
-        }
+        return Math.Min(rawRate + ksrValue, 63);
+    }
 
-        double t = rate / 15.0;
-        return max * Math.Pow(min / max, t);
+    private void UpdateLevel()
+    {
+        int clamped = Math.Clamp(Attenuation, 0, MaxAttenuation);
+        float level = 1f - clamped / (float)MaxAttenuation;
+        Level = Math.Clamp(level, 0f, 1f);
     }
 }

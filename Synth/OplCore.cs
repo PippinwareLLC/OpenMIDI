@@ -20,8 +20,13 @@ public sealed class OplCore
         -1, -1, -1, -1, -1, -1, -1, -1
     };
 
+    private const float DefaultModulationIndex = 1.0f;
+    private const double TwoPi = Math.PI * 2.0;
+
     private double _timerARemainingSeconds;
     private double _timerBRemainingSeconds;
+    private uint _envCounter;
+    private double _chipSampleRemainder;
     private readonly OplOperator[] _operators;
     private readonly OplChannel[] _channels;
 
@@ -83,6 +88,8 @@ public sealed class OplCore
         IrqActive = false;
         _timerARemainingSeconds = 0;
         _timerBRemainingSeconds = 0;
+        _envCounter = 0;
+        _chipSampleRemainder = 0;
 
         foreach (OplOperator op in _operators)
         {
@@ -93,6 +100,8 @@ public sealed class OplCore
         {
             channel.Reset();
         }
+
+        UpdateAllChannelKeyCodes();
     }
 
     public void WriteRegister(int address, byte value)
@@ -136,13 +145,10 @@ public sealed class OplCore
             return;
         }
 
-        StepTimer(OplTimer.A, seconds, ref _timerARemainingSeconds);
-        StepTimer(OplTimer.B, seconds, ref _timerBRemainingSeconds);
+        StepTimers(seconds);
 
-        foreach (OplOperator op in _operators)
-        {
-            op.Envelope.Step(seconds);
-        }
+        double chipSamples = seconds * OplTiming.GetChipSampleRateHz(ChipType);
+        StepChipSamples(chipSamples);
     }
 
     public void StepChipSamples(double chipSamples)
@@ -152,8 +158,29 @@ public sealed class OplCore
             return;
         }
 
-        double seconds = chipSamples / OplTiming.GetChipSampleRateHz(ChipType);
-        StepSeconds(seconds);
+        _chipSampleRemainder += chipSamples;
+        int wholeSamples = (int)_chipSampleRemainder;
+        if (wholeSamples <= 0)
+        {
+            return;
+        }
+
+        _chipSampleRemainder -= wholeSamples;
+
+        for (int i = 0; i < wholeSamples; i++)
+        {
+            _envCounter += 4;
+            if ((_envCounter & 0x03) != 0)
+            {
+                continue;
+            }
+
+            uint envCounter = _envCounter >> 2;
+            foreach (OplOperator op in _operators)
+            {
+                op.Envelope.Step(envCounter);
+            }
+        }
     }
 
     public void StepOutputSamples(int outputSamples, int outputSampleRate)
@@ -164,6 +191,80 @@ public sealed class OplCore
         }
 
         StepSeconds(outputSamples / (double)outputSampleRate);
+    }
+
+    public void Render(float[] interleaved, int offset, int frames, int outputSampleRate)
+    {
+        if (frames <= 0 || outputSampleRate <= 0)
+        {
+            return;
+        }
+
+        if (offset < 0 || interleaved.Length < offset + frames * 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+
+        Array.Clear(interleaved, offset, frames * 2);
+
+        StepTimers(frames / (double)outputSampleRate);
+
+        double chipSamplesPerOutput = OplTiming.ConvertOutputSamplesToChipSamples(1, outputSampleRate, ChipType);
+
+        for (int i = 0; i < frames; i++)
+        {
+            StepChipSamples(chipSamplesPerOutput);
+
+            float left = 0f;
+            float right = 0f;
+
+            for (int channelIndex = 0; channelIndex < _channels.Length; channelIndex++)
+            {
+                OplChannel channel = _channels[channelIndex];
+                int modIndex = channel.ModulatorIndex;
+                int carIndex = channel.CarrierIndex;
+                if (modIndex < 0 || modIndex >= _operators.Length || carIndex < 0 || carIndex >= _operators.Length)
+                {
+                    continue;
+                }
+
+                double baseFrequency = ComputeChannelFrequency(channel);
+                if (baseFrequency <= 0)
+                {
+                    continue;
+                }
+
+                OplOperator mod = _operators[modIndex];
+                OplOperator car = _operators[carIndex];
+
+                float modOutput = RenderOperator(mod, baseFrequency, outputSampleRate, 0f, channel.Feedback, applyFeedback: true);
+                float carrierPhaseMod = channel.Additive ? 0f : modOutput * DefaultModulationIndex;
+                float carOutput = RenderOperator(car, baseFrequency, outputSampleRate, carrierPhaseMod, 0, applyFeedback: false);
+                float sample = channel.Additive ? modOutput + carOutput : carOutput;
+
+                bool leftOn = channel.LeftEnable || (!channel.LeftEnable && !channel.RightEnable);
+                bool rightOn = channel.RightEnable || (!channel.LeftEnable && !channel.RightEnable);
+
+                if (leftOn)
+                {
+                    left += sample;
+                }
+
+                if (rightOn)
+                {
+                    right += sample;
+                }
+            }
+
+            interleaved[offset + i * 2] = Math.Clamp(left, -1f, 1f);
+            interleaved[offset + i * 2 + 1] = Math.Clamp(right, -1f, 1f);
+        }
+    }
+
+    private void StepTimers(double seconds)
+    {
+        StepTimer(OplTimer.A, seconds, ref _timerARemainingSeconds);
+        StepTimer(OplTimer.B, seconds, ref _timerBRemainingSeconds);
     }
 
     private void StepTimer(OplTimer timer, double seconds, ref double remaining)
@@ -233,12 +334,20 @@ public sealed class OplCore
         int bank = (address & 0x100) != 0 ? 1 : 0;
         int reg = address & 0xFF;
 
+        if (reg == 0x08)
+        {
+            UpdateAllChannelKeyCodes();
+            return;
+        }
+
         if (reg >= 0xA0 && reg <= 0xA8)
         {
             int channelIndex = GetChannelIndex(bank, reg);
             if (channelIndex >= 0)
             {
-                _channels[channelIndex].ApplyFrequencyLow(value);
+                OplChannel channel = _channels[channelIndex];
+                channel.ApplyFrequencyLow(value);
+                UpdateChannelKeyCode(channel);
             }
             return;
         }
@@ -251,6 +360,7 @@ public sealed class OplCore
                 OplChannel channel = _channels[channelIndex];
                 bool wasKeyOn = channel.KeyOn;
                 channel.ApplyBlockKeyOn(value);
+                UpdateChannelKeyCode(channel);
                 if (channel.KeyOn != wasKeyOn)
                 {
                     SetChannelKeyOn(channel, channel.KeyOn);
@@ -278,6 +388,31 @@ public sealed class OplCore
                 _operators[opIndex].ApplyRegister(group, value);
             }
         }
+    }
+
+    private void UpdateAllChannelKeyCodes()
+    {
+        foreach (OplChannel channel in _channels)
+        {
+            UpdateChannelKeyCode(channel);
+        }
+    }
+
+    private void UpdateChannelKeyCode(OplChannel channel)
+    {
+        channel.UpdateKeyCode(Registers.NoteSelectEnabled);
+        UpdateOperatorKeyCode(channel.ModulatorIndex, channel.KeyCode);
+        UpdateOperatorKeyCode(channel.CarrierIndex, channel.KeyCode);
+    }
+
+    private void UpdateOperatorKeyCode(int opIndex, int keyCode)
+    {
+        if (opIndex < 0 || opIndex >= _operators.Length)
+        {
+            return;
+        }
+
+        _operators[opIndex].UpdateKeyCode(keyCode);
     }
 
     private void SetChannelKeyOn(OplChannel channel, bool keyOn)
@@ -336,6 +471,132 @@ public sealed class OplCore
         }
 
         return index + bank * 18;
+    }
+
+    private double ComputeChannelFrequency(OplChannel channel)
+    {
+        if (channel.FNum <= 0)
+        {
+            return 0.0;
+        }
+
+        double sampleRate = OplTiming.GetChipSampleRateHz(ChipType);
+        int blockShift = Math.Clamp(channel.Block, 0, 7);
+        double blockScale = 1 << blockShift;
+        return channel.FNum * blockScale * sampleRate / (1 << 20);
+    }
+
+    private float RenderOperator(OplOperator op, double baseFrequency, int outputSampleRate, float phaseModulation, byte feedback, bool applyFeedback)
+    {
+        if (outputSampleRate <= 0)
+        {
+            return 0f;
+        }
+
+        float envelopeLevel = op.Envelope.Level;
+        if (envelopeLevel <= 0f && op.Envelope.Stage == OplEnvelopeStage.Off)
+        {
+            op.PreviousOutput = op.LastOutput;
+            op.LastOutput = 0f;
+            return 0f;
+        }
+
+        int multipleIndex = Math.Clamp(op.Multiple, 0, OplEnvelopeTables.MultipleTable.Length - 1);
+        double frequency = baseFrequency * OplEnvelopeTables.MultipleTable[multipleIndex];
+        if (frequency <= 0)
+        {
+            op.PreviousOutput = op.LastOutput;
+            op.LastOutput = 0f;
+            return 0f;
+        }
+
+        double phaseStep = TwoPi * frequency / outputSampleRate;
+        float feedbackPhase = 0f;
+        if (applyFeedback && feedback != 0)
+        {
+            float scale = ComputeFeedbackScale(feedback);
+            if (scale != 0f)
+            {
+                feedbackPhase = (op.LastOutput + op.PreviousOutput) * 0.5f * scale;
+            }
+        }
+
+        double phase = op.Phase + phaseModulation + feedbackPhase;
+        float waveform = ComputeWaveformSample(op.WaveformIndex, phase);
+        float totalLevelScale = ComputeTotalLevelScale(op.TotalLevel);
+        float output = waveform * envelopeLevel * totalLevelScale;
+
+        op.PreviousOutput = op.LastOutput;
+        op.LastOutput = output;
+        op.Phase = WrapPhase(op.Phase + phaseStep);
+
+        return output;
+    }
+
+    private static float ComputeTotalLevelScale(int totalLevel)
+    {
+        float attenuationDb = totalLevel * 0.75f;
+        return (float)Math.Pow(10.0, -attenuationDb / 20.0);
+    }
+
+    private static float ComputeFeedbackScale(byte feedback)
+    {
+        if (feedback == 0)
+        {
+            return 0f;
+        }
+
+        return feedback / 7f * 2f;
+    }
+
+    private static float ComputeWaveformSample(int waveform, double phase)
+    {
+        double angle = phase % TwoPi;
+        if (angle < 0)
+        {
+            angle += TwoPi;
+        }
+
+        double sample = Math.Sin(angle);
+        switch (waveform & 0x07)
+        {
+            case 0:
+                return (float)sample;
+            case 1:
+                return sample > 0 ? (float)sample : 0f;
+            case 2:
+                return (float)Math.Abs(sample);
+            case 3:
+                return sample > 0 ? (float)(sample * sample) : 0f;
+            case 4:
+                return (float)Math.Sin(angle * 2.0);
+            case 5:
+            {
+                double half = Math.Sin(angle * 2.0);
+                return half > 0 ? (float)half : 0f;
+            }
+            case 6:
+                return (float)Math.Abs(Math.Sin(angle * 2.0));
+            case 7:
+                return sample >= 0 ? 1f : -1f;
+            default:
+                return (float)sample;
+        }
+    }
+
+    private static double WrapPhase(double phase)
+    {
+        if (phase >= TwoPi || phase <= -TwoPi)
+        {
+            phase %= TwoPi;
+        }
+
+        if (phase < 0)
+        {
+            phase += TwoPi;
+        }
+
+        return phase;
     }
 
     private void UpdateIrq()

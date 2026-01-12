@@ -10,16 +10,16 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [ ] Add deterministic reset/power-on state and register defaults.
 
 ## Operator Engine
-- [ ] Oscillator core with phase accumulation and waveform selection.
+- [x] Oscillator core with phase accumulation and waveform selection.
 - [x] Envelope generator with attack/decay/sustain/release rate tables.
 - [ ] Key scaling level (KSL) and key scaling rate (KSR).
 - [ ] Tremolo and vibrato LFOs with depth/rate control.
 
 ## Channel Algorithms
-- [ ] 2-operator algorithms (FM/AM) with feedback.
+- [x] 2-operator algorithms (FM/AM) with feedback.
 - [ ] Rhythm mode (BD/SD/TT/CY/HH) with proper operator routing.
 - [ ] OPL3 4-operator channel pairing and algorithm selection.
-- [ ] OPL3 stereo output routing (left/right enable per channel).
+- [x] OPL3 stereo output routing (left/right enable per channel).
 
 ## MIDI Mapping
 - [ ] Instrument bank format for OPL patches (operators + algorithm + feedback).
@@ -33,6 +33,7 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [ ] Optional oversampling/low-pass to match reference hardware output.
 
 ## Verification
+- [x] Envelope rate table validation against ymfm reference data.
 - [ ] Register-level golden tests against a reference emulator (eg. Nuked OPL3).
 - [ ] MIDI playback parity tests using known reference recordings.
 - [ ] Performance validation for real-time playback at 44.1/48 kHz.

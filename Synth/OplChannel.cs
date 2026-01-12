@@ -20,6 +20,7 @@ public sealed class OplChannel
     public bool LeftEnable { get; private set; }
     public bool RightEnable { get; private set; }
     public byte RawFeedbackConnection { get; private set; }
+    public int KeyCode { get; private set; }
 
     public void Reset()
     {
@@ -31,6 +32,7 @@ public sealed class OplChannel
         LeftEnable = false;
         RightEnable = false;
         RawFeedbackConnection = 0;
+        KeyCode = 0;
     }
 
     public void ApplyFrequencyLow(byte value)
@@ -52,5 +54,11 @@ public sealed class OplChannel
         Additive = (value & 0x01) != 0;
         LeftEnable = (value & 0x10) != 0;
         RightEnable = (value & 0x20) != 0;
+    }
+
+    public void UpdateKeyCode(bool noteSelectEnabled)
+    {
+        int shift = noteSelectEnabled ? 8 : 9;
+        KeyCode = (Block << 1) | ((FNum >> shift) & 0x01);
     }
 }

@@ -15,6 +15,10 @@ public sealed class OplOperator
     public byte ArDr { get; private set; }
     public byte SlRr { get; private set; }
     public byte Waveform { get; private set; }
+    public int KeyCode { get; private set; }
+    public double Phase { get; set; }
+    public float LastOutput { get; set; }
+    public float PreviousOutput { get; set; }
 
     public bool Tremolo => (AmVibEgtKsrMult & 0x80) != 0;
     public bool Vibrato => (AmVibEgtKsrMult & 0x40) != 0;
@@ -41,8 +45,12 @@ public sealed class OplOperator
         ArDr = 0;
         SlRr = 0;
         Waveform = 0;
+        KeyCode = 0;
+        Phase = 0;
+        LastOutput = 0f;
+        PreviousOutput = 0f;
         Envelope.Reset();
-        Envelope.SetRates(AttackRate, DecayRate, SustainLevel, ReleaseRate);
+        UpdateEnvelope();
     }
 
     public void ApplyRegister(int registerGroup, byte value)
@@ -51,21 +59,39 @@ public sealed class OplOperator
         {
             case 0x20:
                 AmVibEgtKsrMult = value;
+                UpdateEnvelope();
                 break;
             case 0x40:
                 KslTl = value;
                 break;
             case 0x60:
                 ArDr = value;
-                Envelope.SetRates(AttackRate, DecayRate, SustainLevel, ReleaseRate);
+                UpdateEnvelope();
                 break;
             case 0x80:
                 SlRr = value;
-                Envelope.SetRates(AttackRate, DecayRate, SustainLevel, ReleaseRate);
+                UpdateEnvelope();
                 break;
             case 0xE0:
                 Waveform = (byte)(value & 0x07);
                 break;
         }
+    }
+
+    public void UpdateKeyCode(int keyCode)
+    {
+        int clamped = Math.Clamp(keyCode, 0, 15);
+        if (KeyCode == clamped)
+        {
+            return;
+        }
+
+        KeyCode = clamped;
+        UpdateEnvelope();
+    }
+
+    private void UpdateEnvelope()
+    {
+        Envelope.Configure(AttackRate, DecayRate, SustainLevel, ReleaseRate, Sustain, KeyScaleRate, KeyCode);
     }
 }

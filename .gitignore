@@ -4,3 +4,4 @@ ReferenceAssets/**
 bin/
 obj/
 .vs/
+*.mid
