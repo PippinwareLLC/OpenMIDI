@@ -1,4 +1,6 @@
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using OpenMIDI.Midi;
 using OpenMIDI.Playback;
 using OpenMIDI.Synth;
@@ -36,8 +38,10 @@ public static class Program
         MidiPlayer player = new MidiPlayer(synth);
         player.Load(midi);
 
-        PlaybackState state = new PlaybackState(player, SampleRate);
+        PlaybackState state = new PlaybackState(player, synth, SampleRate, Channels);
+        ConsoleStatusRenderer statusRenderer = new ConsoleStatusRenderer(state, midiPath);
         GCHandle handle = GCHandle.Alloc(state);
+        statusRenderer.Initialize();
 
         try
         {
@@ -68,14 +72,17 @@ public static class Program
                     break;
                 }
 
+                statusRenderer.Render();
                 SDL.SDL_Delay(100);
             }
 
+            statusRenderer.Render();
             SDL.SDL_Delay(200);
             SDL.SDL_CloseAudioDevice(device);
         }
         finally
         {
+            statusRenderer.Shutdown();
             if (handle.IsAllocated)
             {
                 handle.Free();
@@ -184,7 +191,7 @@ public static class Program
         }
 
         int sampleCount = len / sizeof(float);
-        int frames = sampleCount / Channels;
+        int frames = sampleCount / state.Channels;
         if (frames <= 0)
         {
             return;
@@ -209,14 +216,119 @@ public static class Program
 
     private sealed class PlaybackState
     {
-        public PlaybackState(MidiPlayer player, int sampleRate)
+        public PlaybackState(MidiPlayer player, OplSynth synth, int sampleRate, int channels)
         {
             Player = player;
+            Synth = synth;
             SampleRate = sampleRate;
+            Channels = channels;
         }
 
         public MidiPlayer Player { get; }
+        public OplSynth Synth { get; }
         public int SampleRate { get; }
+        public int Channels { get; }
         public float[] Buffer { get; set; } = Array.Empty<float>();
+    }
+
+    private sealed class ConsoleStatusRenderer
+    {
+        private const int ChannelCount = 16;
+        private const int VuBarWidth = 24;
+        private const int ChannelBarWidth = 16;
+        private readonly PlaybackState _state;
+        private readonly string _midiPath;
+        private readonly int[] _channelCounts = new int[ChannelCount];
+        private readonly float[] _channelLevels = new float[ChannelCount];
+        private readonly bool _interactive;
+        private int _lineWidth;
+
+        public ConsoleStatusRenderer(PlaybackState state, string midiPath)
+        {
+            _state = state;
+            _midiPath = midiPath;
+            _interactive = !Console.IsOutputRedirected;
+        }
+
+        public void Initialize()
+        {
+            if (!_interactive)
+            {
+                return;
+            }
+
+            _lineWidth = GetLineWidth();
+            Console.Clear();
+            Console.CursorVisible = false;
+        }
+
+        public void Render()
+        {
+            if (!_interactive)
+            {
+                return;
+            }
+
+            _state.Synth.CopyChannelMeters(_channelCounts, _channelLevels);
+
+            StringBuilder builder = new StringBuilder();
+            builder.AppendLine(PadLine($"OpenMIDI OPL Status - {Path.GetFileName(_midiPath)}", _lineWidth));
+            builder.AppendLine(PadLine(
+                $"Time {_state.Player.CurrentTimeSeconds:0.00}/{_state.Player.DurationSeconds:0.00}s  Voices {_state.Synth.ActiveVoiceCount}/{_state.Synth.VoiceCount}",
+                _lineWidth));
+            builder.AppendLine(PadLine(
+                $"VU L {FormatBar(_state.Synth.LastPeakLeft, VuBarWidth)} {_state.Synth.LastPeakLeft:0.00}  R {FormatBar(_state.Synth.LastPeakRight, VuBarWidth)} {_state.Synth.LastPeakRight:0.00}",
+                _lineWidth));
+            builder.AppendLine(PadLine("Channels:", _lineWidth));
+
+            for (int i = 0; i < ChannelCount; i++)
+            {
+                string line = $" CH{i + 1:00} {FormatBar(_channelLevels[i], ChannelBarWidth)} {_channelCounts[i],2} voice(s)";
+                builder.AppendLine(PadLine(line, _lineWidth));
+            }
+
+            Console.SetCursorPosition(0, 0);
+            Console.Write(builder.ToString());
+        }
+
+        public void Shutdown()
+        {
+            if (!_interactive)
+            {
+                return;
+            }
+
+            Console.CursorVisible = true;
+        }
+
+        private static string FormatBar(float value, int width)
+        {
+            float clamped = Math.Clamp(value, 0f, 1f);
+            int filled = (int)Math.Round(clamped * width, MidpointRounding.AwayFromZero);
+            filled = Math.Clamp(filled, 0, width);
+            return $"[{new string('#', filled)}{new string('-', width - filled)}]";
+        }
+
+        private static string PadLine(string line, int width)
+        {
+            if (line.Length >= width)
+            {
+                return line;
+            }
+
+            return line + new string(' ', width - line.Length);
+        }
+
+        private static int GetLineWidth()
+        {
+            try
+            {
+                return Math.Max(60, Console.WindowWidth);
+            }
+            catch (IOException)
+            {
+                return 80;
+            }
+        }
     }
 }

@@ -8,6 +8,8 @@ to validate the MIDI timing and PCM output pipeline while the OPL core is built.
 - MIDI parsing and event scheduling are implemented.
 - A placeholder synth produces PCM output for validation.
 - An SDL example host plays a bundled sample MIDI file.
+- An OPL register map with timer/control/rhythm side-effects is defined.
+- The SDL example renders a live console VU/channel activity view during playback.
 
 ## Quickstart
 Build everything:
@@ -33,7 +35,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Feature | OPL1 | OPL2 | OPL3 |
 | --- | --- | --- | --- |
 | Chip clock/timer constants and sample rate conversion | [x] | [x] | [x] |
-| Register map with write side-effects | [ ] | [ ] | [ ] |
+| Register map with write side-effects | [x] | [x] | [x] |
 | Operator envelopes (attack/decay/sustain/release) | [ ] | [ ] | [ ] |
 | Waveform selection | [ ] | [ ] | [ ] |
 | Tremolo/vibrato LFOs | [ ] | [ ] | [ ] |

@@ -4,7 +4,7 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 
 ## Foundations
 - [x] Define chip clock/timer constants for OPL1/OPL2/OPL3 and sample rate conversion.
-- [ ] Implement full OPL register maps with correct bit masking and write side-effects.
+- [x] Implement full OPL register maps with correct bit masking and write side-effects.
 - [ ] Add deterministic reset/power-on state and register defaults.
 
 ## Operator Engine

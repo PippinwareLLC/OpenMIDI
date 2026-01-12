@@ -56,6 +56,11 @@ public sealed class OplSynth : IMidiSynth
     private readonly OplVoice[] _voices;
     private readonly MidiChannelState[] _channels;
     private int _ageCounter;
+    private readonly int[] _channelActiveCounts;
+    private readonly float[] _channelLevels;
+    private int _activeVoiceCount;
+    private float _lastPeakLeft;
+    private float _lastPeakRight;
 
     public OplSynth(OplSynthMode mode = OplSynthMode.Opl3)
     {
@@ -71,12 +76,19 @@ public sealed class OplSynth : IMidiSynth
         {
             _channels[i] = new MidiChannelState();
         }
+
+        _channelActiveCounts = new int[16];
+        _channelLevels = new float[16];
     }
 
     public float MasterGain { get; set; } = 0.2f;
     public float AttackPerSecond { get; set; } = 6f;
     public float ReleasePerSecond { get; set; } = 3f;
     public float PitchBendRangeSemitones { get; set; } = 2f;
+    public int VoiceCount => _voices.Length;
+    public int ActiveVoiceCount => _activeVoiceCount;
+    public float LastPeakLeft => _lastPeakLeft;
+    public float LastPeakRight => _lastPeakRight;
 
     public void Reset()
     {
@@ -103,6 +115,11 @@ public sealed class OplSynth : IMidiSynth
         }
 
         _ageCounter = 0;
+        _activeVoiceCount = 0;
+        _lastPeakLeft = 0f;
+        _lastPeakRight = 0f;
+        Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
+        Array.Clear(_channelLevels, 0, _channelLevels.Length);
     }
 
     public void NoteOn(int channel, int note, int velocity)
@@ -210,6 +227,27 @@ public sealed class OplSynth : IMidiSynth
 
         Array.Clear(interleaved, offset, frames * 2);
 
+        Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
+        Array.Clear(_channelLevels, 0, _channelLevels.Length);
+        _activeVoiceCount = 0;
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active)
+            {
+                continue;
+            }
+
+            _activeVoiceCount++;
+            if (voice.Channel >= 0 && voice.Channel < _channelActiveCounts.Length)
+            {
+                _channelActiveCounts[voice.Channel]++;
+                _channelLevels[voice.Channel] += voice.Envelope.Level * (voice.GainLeft + voice.GainRight) * 0.5f;
+            }
+        }
+
+        float peakLeft = 0f;
+        float peakRight = 0f;
+
         for (int i = 0; i < frames; i++)
         {
             float left = 0f;
@@ -242,9 +280,27 @@ public sealed class OplSynth : IMidiSynth
                 right += (float)sample * voice.GainRight;
             }
 
-            interleaved[offset + i * 2] = Math.Clamp(left, -1f, 1f);
-            interleaved[offset + i * 2 + 1] = Math.Clamp(right, -1f, 1f);
+            float clampedLeft = Math.Clamp(left, -1f, 1f);
+            float clampedRight = Math.Clamp(right, -1f, 1f);
+
+            peakLeft = Math.Max(peakLeft, Math.Abs(clampedLeft));
+            peakRight = Math.Max(peakRight, Math.Abs(clampedRight));
+
+            interleaved[offset + i * 2] = clampedLeft;
+            interleaved[offset + i * 2 + 1] = clampedRight;
         }
+
+        _lastPeakLeft = peakLeft;
+        _lastPeakRight = peakRight;
+    }
+
+    public void CopyChannelMeters(Span<int> counts, Span<float> levels)
+    {
+        int countLength = Math.Min(counts.Length, _channelActiveCounts.Length);
+        _channelActiveCounts.AsSpan(0, countLength).CopyTo(counts);
+
+        int levelLength = Math.Min(levels.Length, _channelLevels.Length);
+        _channelLevels.AsSpan(0, levelLength).CopyTo(levels);
     }
 
     private OplVoice AllocateVoice(int channel, int note)
