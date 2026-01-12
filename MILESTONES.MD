@@ -12,8 +12,8 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 ## Operator Engine
 - [x] Oscillator core with phase accumulation and waveform selection.
 - [x] Envelope generator with attack/decay/sustain/release rate tables.
-- [ ] Key scaling level (KSL) and key scaling rate (KSR).
-- [ ] Tremolo and vibrato LFOs with depth/rate control.
+- [x] Key scaling level (KSL) and key scaling rate (KSR).
+- [x] Tremolo and vibrato LFOs with depth/rate control.
 
 ## Channel Algorithms
 - [x] 2-operator algorithms (FM/AM) with feedback.

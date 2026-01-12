@@ -22,11 +22,18 @@ public sealed class OplCore
 
     private const float DefaultModulationIndex = 1.0f;
     private const double TwoPi = Math.PI * 2.0;
+    private static readonly int[] KeyScaleLevelTable = { 0, 24, 32, 37, 40, 43, 45, 47, 48, 50, 51, 52, 53, 54, 55, 56 };
+    private static readonly int[] PmScale = { 8, 4, 0, -4, -8, -4, 0, 4 };
 
     private double _timerARemainingSeconds;
     private double _timerBRemainingSeconds;
     private uint _envCounter;
     private double _chipSampleRemainder;
+    private uint _noiseLfsr = 1;
+    private ushort _lfoAmCounter;
+    private ushort _lfoPmCounter;
+    private byte _lfoAm;
+    private int _lfoPm;
     private readonly OplOperator[] _operators;
     private readonly OplChannel[] _channels;
 
@@ -90,6 +97,11 @@ public sealed class OplCore
         _timerBRemainingSeconds = 0;
         _envCounter = 0;
         _chipSampleRemainder = 0;
+        _noiseLfsr = 1;
+        _lfoAmCounter = 0;
+        _lfoPmCounter = 0;
+        _lfoAm = 0;
+        _lfoPm = 0;
 
         foreach (OplOperator op in _operators)
         {
@@ -170,15 +182,15 @@ public sealed class OplCore
         for (int i = 0; i < wholeSamples; i++)
         {
             _envCounter += 4;
-            if ((_envCounter & 0x03) != 0)
-            {
-                continue;
-            }
+            _lfoPm = ClockLfo();
 
-            uint envCounter = _envCounter >> 2;
-            foreach (OplOperator op in _operators)
+            if ((_envCounter & 0x03) == 0)
             {
-                op.Envelope.Step(envCounter);
+                uint envCounter = _envCounter >> 2;
+                foreach (OplOperator op in _operators)
+                {
+                    op.Envelope.Step(envCounter);
+                }
             }
         }
     }
@@ -228,18 +240,12 @@ public sealed class OplCore
                     continue;
                 }
 
-                double baseFrequency = ComputeChannelFrequency(channel);
-                if (baseFrequency <= 0)
-                {
-                    continue;
-                }
-
                 OplOperator mod = _operators[modIndex];
                 OplOperator car = _operators[carIndex];
 
-                float modOutput = RenderOperator(mod, baseFrequency, outputSampleRate, 0f, channel.Feedback, applyFeedback: true);
+                float modOutput = RenderOperator(mod, channel, outputSampleRate, 0f, channel.Feedback, applyFeedback: true);
                 float carrierPhaseMod = channel.Additive ? 0f : modOutput * DefaultModulationIndex;
-                float carOutput = RenderOperator(car, baseFrequency, outputSampleRate, carrierPhaseMod, 0, applyFeedback: false);
+                float carOutput = RenderOperator(car, channel, outputSampleRate, carrierPhaseMod, 0, applyFeedback: false);
                 float sample = channel.Additive ? modOutput + carOutput : carOutput;
 
                 bool leftOn = channel.LeftEnable || (!channel.LeftEnable && !channel.RightEnable);
@@ -473,44 +479,28 @@ public sealed class OplCore
         return index + bank * 18;
     }
 
-    private double ComputeChannelFrequency(OplChannel channel)
-    {
-        if (channel.FNum <= 0)
-        {
-            return 0.0;
-        }
-
-        double sampleRate = OplTiming.GetChipSampleRateHz(ChipType);
-        int blockShift = Math.Clamp(channel.Block, 0, 7);
-        double blockScale = 1 << blockShift;
-        return channel.FNum * blockScale * sampleRate / (1 << 20);
-    }
-
-    private float RenderOperator(OplOperator op, double baseFrequency, int outputSampleRate, float phaseModulation, byte feedback, bool applyFeedback)
+    private float RenderOperator(OplOperator op, OplChannel channel, int outputSampleRate, float phaseModulation, byte feedback, bool applyFeedback)
     {
         if (outputSampleRate <= 0)
         {
             return 0f;
         }
 
-        float envelopeLevel = op.Envelope.Level;
-        if (envelopeLevel <= 0f && op.Envelope.Stage == OplEnvelopeStage.Off)
+        if (op.Envelope.Stage == OplEnvelopeStage.Off && op.Envelope.Attenuation >= 0x3FF)
         {
             op.PreviousOutput = op.LastOutput;
             op.LastOutput = 0f;
             return 0f;
         }
 
-        int multipleIndex = Math.Clamp(op.Multiple, 0, OplEnvelopeTables.MultipleTable.Length - 1);
-        double frequency = baseFrequency * OplEnvelopeTables.MultipleTable[multipleIndex];
-        if (frequency <= 0)
+        double phaseStep = ComputePhaseStep(op, channel, _lfoPm, outputSampleRate);
+        if (phaseStep == 0)
         {
             op.PreviousOutput = op.LastOutput;
             op.LastOutput = 0f;
             return 0f;
         }
 
-        double phaseStep = TwoPi * frequency / outputSampleRate;
         float feedbackPhase = 0f;
         if (applyFeedback && feedback != 0)
         {
@@ -522,9 +512,7 @@ public sealed class OplCore
         }
 
         double phase = op.Phase + phaseModulation + feedbackPhase;
-        float waveform = ComputeWaveformSample(op.WaveformIndex, phase);
-        float totalLevelScale = ComputeTotalLevelScale(op.TotalLevel);
-        float output = waveform * envelopeLevel * totalLevelScale;
+        float output = ComputeWaveformOutput(op, channel, phase);
 
         op.PreviousOutput = op.LastOutput;
         op.LastOutput = output;
@@ -533,10 +521,22 @@ public sealed class OplCore
         return output;
     }
 
-    private static float ComputeTotalLevelScale(int totalLevel)
+    private int ComputeOperatorAttenuation(OplOperator op, OplChannel channel)
     {
-        float attenuationDb = totalLevel * 0.75f;
-        return (float)Math.Pow(10.0, -attenuationDb / 20.0);
+        int totalLevel = op.TotalLevel << 3;
+        if (op.KeyScaleLevel != 0)
+        {
+            int ksl = ComputeKeyScaleAttenuation(channel.Block, channel.FNum);
+            totalLevel += ksl << op.KeyScaleLevel;
+        }
+
+        int attenuation = op.Envelope.Attenuation + totalLevel;
+        if (op.Tremolo)
+        {
+            attenuation += _lfoAm;
+        }
+
+        return Math.Clamp(attenuation, 0, 0x3FF);
     }
 
     private static float ComputeFeedbackScale(byte feedback)
@@ -549,39 +549,54 @@ public sealed class OplCore
         return feedback / 7f * 2f;
     }
 
-    private static float ComputeWaveformSample(int waveform, double phase)
+    private double ComputePhaseStep(OplOperator op, OplChannel channel, int lfoPm, int outputSampleRate)
     {
-        double angle = phase % TwoPi;
-        if (angle < 0)
+        int fnum = channel.FNum;
+        if (fnum <= 0)
         {
-            angle += TwoPi;
+            return 0;
         }
 
-        double sample = Math.Sin(angle);
-        switch (waveform & 0x07)
+        int fnum12 = fnum << 2;
+        if (op.Vibrato && lfoPm != 0)
         {
-            case 0:
-                return (float)sample;
-            case 1:
-                return sample > 0 ? (float)sample : 0f;
-            case 2:
-                return (float)Math.Abs(sample);
-            case 3:
-                return sample > 0 ? (float)(sample * sample) : 0f;
-            case 4:
-                return (float)Math.Sin(angle * 2.0);
-            case 5:
-            {
-                double half = Math.Sin(angle * 2.0);
-                return half > 0 ? (float)half : 0f;
-            }
-            case 6:
-                return (float)Math.Abs(Math.Sin(angle * 2.0));
-            case 7:
-                return sample >= 0 ? 1f : -1f;
-            default:
-                return (float)sample;
+            int fnumHigh = (fnum >> 7) & 0x07;
+            fnum12 += (lfoPm * fnumHigh) >> 1;
         }
+
+        fnum12 &= 0xFFF;
+        int blockShift = Math.Clamp(channel.Block, 0, 7);
+        double phaseStepBase = (fnum12 * (1 << blockShift)) / 4.0;
+        int multipleIndex = Math.Clamp(op.Multiple, 0, OplEnvelopeTables.MultipleTable.Length - 1);
+        double phaseStep = phaseStepBase * OplEnvelopeTables.MultipleTable[multipleIndex];
+
+        double chipSampleRate = OplTiming.GetChipSampleRateHz(ChipType);
+        double frequency = phaseStep * chipSampleRate / 1048576.0;
+        return TwoPi * frequency / outputSampleRate;
+    }
+
+    private float ComputeWaveformOutput(OplOperator op, OplChannel channel, double phase)
+    {
+        int attenuation = ComputeOperatorAttenuation(op, channel);
+        if (attenuation >= 0x3FF)
+        {
+            return 0f;
+        }
+
+        int phaseIndex = (int)(phase / TwoPi * OplWaveformTables.WaveformLength);
+        ushort waveform = OplWaveformTables.GetWaveformSample(op.WaveformIndex, phaseIndex);
+        int sign = (waveform & 0x8000) != 0 ? -1 : 1;
+        uint sinAtten = (uint)(waveform & 0x7FFF);
+        uint totalAtten = sinAtten + ((uint)attenuation << 2);
+        int volume = OplWaveformTables.AttenuationToVolume(totalAtten);
+        return sign * (volume / 8192f);
+    }
+
+    private static int ComputeKeyScaleAttenuation(int block, int fnum)
+    {
+        int fnum4msb = (fnum >> 6) & 0x0F;
+        int adjusted = KeyScaleLevelTable[fnum4msb] - 8 * (block ^ 7);
+        return Math.Max(0, adjusted);
     }
 
     private static double WrapPhase(double phase)
@@ -597,6 +612,27 @@ public sealed class OplCore
         }
 
         return phase;
+    }
+
+    private int ClockLfo()
+    {
+        _noiseLfsr <<= 1;
+        _noiseLfsr |= ((_noiseLfsr >> 23) ^ (_noiseLfsr >> 9) ^ (_noiseLfsr >> 8) ^ (_noiseLfsr >> 1)) & 0x01;
+
+        uint amCounter = _lfoAmCounter++;
+        if (amCounter >= 210 * 64 - 1)
+        {
+            _lfoAmCounter = 0;
+        }
+
+        int shift = 9 - 2 * (Registers.TremoloDepth ? 1 : 0);
+        uint amValue = amCounter < 105 * 64 ? amCounter : (uint)(210 * 64 + 63 - amCounter);
+        _lfoAm = (byte)(amValue >> shift);
+
+        uint pmCounter = _lfoPmCounter++;
+        int index = (int)((pmCounter >> 10) & 0x07);
+        int pm = PmScale[index];
+        return pm >> ((Registers.VibratoDepth ? 1 : 0) ^ 1);
     }
 
     private void UpdateIrq()

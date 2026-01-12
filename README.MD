@@ -1,19 +1,20 @@
 # OpenMIDI
 
 OpenMIDI is a pure C# MIDI loader and playback path that targets classic OPL
-(Adlib/Sound Blaster) synthesis. The current synth is a placeholder oscillator
-to validate the MIDI timing and PCM output pipeline while the OPL core is built.
+(Adlib/Sound Blaster) synthesis. MIDI playback now drives the register-accurate
+OPL core render path with a default 2-op patch while instrument mapping is expanded.
 
 ## Status
 - MIDI parsing and event scheduling are implemented.
-- A placeholder synth produces PCM output for validation.
+- MIDI playback uses the register-accurate OPL core render path.
 - An SDL example host plays a bundled sample MIDI file.
 - An OPL register map with timer/control/rhythm side-effects is defined.
 - The OPL core tracks register writes, timer counters, operator envelopes, and keycode scaling.
 - A 2-operator render path now drives phase accumulation, waveform selection, and feedback mixing.
 - Envelope rate tables are aligned with the ymfm reference and validated by tests.
 - The SDL example renders a live console VU/channel activity view during playback.
-- Waveform shapes are currently approximations pending log-sine tables.
+- Log-sine waveform tables and key scale attenuation are now in use.
+- Tremolo and vibrato LFOs are implemented with depth control.
 
 ## Quickstart
 Build everything:
@@ -42,8 +43,9 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Register map with write side-effects | [x] | [x] | [x] |
 | Timer A/B counters and IRQ status | [x] | [x] | [x] |
 | Operator envelopes (attack/decay/sustain/release) | [x] | [x] | [x] |
+| Key scale level/rate | [x] | [x] | [x] |
 | Waveform selection | [x] | [x] | [x] |
-| Tremolo/vibrato LFOs | [ ] | [ ] | [ ] |
+| Tremolo/vibrato LFOs | [x] | [x] | [x] |
 | 2-operator algorithms and feedback | [x] | [x] | [x] |
 | Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [ ] | [ ] |
 | 4-operator channel pairing | [ ] | [ ] | [ ] |
