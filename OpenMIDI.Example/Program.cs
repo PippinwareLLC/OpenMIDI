@@ -279,6 +279,7 @@ public static class Program
             builder.AppendLine(PadLine(
                 $"VU L {FormatBar(_state.Synth.LastPeakLeft, VuBarWidth)} {_state.Synth.LastPeakLeft:0.00}  R {FormatBar(_state.Synth.LastPeakRight, VuBarWidth)} {_state.Synth.LastPeakRight:0.00}",
                 _lineWidth));
+            builder.AppendLine(PadLine(BuildOplStatusLine(), _lineWidth));
             builder.AppendLine(PadLine("Channels:", _lineWidth));
 
             for (int i = 0; i < ChannelCount; i++)
@@ -329,6 +330,21 @@ public static class Program
             {
                 return 80;
             }
+        }
+
+        private string BuildOplStatusLine()
+        {
+            OplCore core = _state.Synth.Core;
+            OplRegisterMap regs = core.Registers;
+            string irq = core.IrqActive ? "IRQ" : "irq";
+            string ta = regs.TimerAEnabled ? "TA" : "ta";
+            string tb = regs.TimerBEnabled ? "TB" : "tb";
+            string taFlag = regs.TimerAOverflow ? "!" : "-";
+            string tbFlag = regs.TimerBOverflow ? "!" : "-";
+
+            return $"OPL {core.ChipType} {irq} {ta}:{regs.TimerAValue:X2}{taFlag} {tb}:{regs.TimerBValue:X2}{tbFlag} " +
+                   $"Status 0x{core.Status:X2} CSM {(regs.CsmEnabled ? "on" : "off")} " +
+                   $"Rhythm {(regs.RhythmEnabled ? "on" : "off")}";
         }
     }
 }

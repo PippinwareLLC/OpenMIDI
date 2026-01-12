@@ -79,6 +79,7 @@ public sealed class OplSynth : IMidiSynth
 
         _channelActiveCounts = new int[16];
         _channelLevels = new float[16];
+        Core = new OplCore(mode == OplSynthMode.Opl3 ? OplChipType.Opl3 : OplChipType.Opl2);
     }
 
     public float MasterGain { get; set; } = 0.2f;
@@ -89,6 +90,7 @@ public sealed class OplSynth : IMidiSynth
     public int ActiveVoiceCount => _activeVoiceCount;
     public float LastPeakLeft => _lastPeakLeft;
     public float LastPeakRight => _lastPeakRight;
+    public OplCore Core { get; }
 
     public void Reset()
     {
@@ -120,6 +122,7 @@ public sealed class OplSynth : IMidiSynth
         _lastPeakRight = 0f;
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
+        Core.Reset();
     }
 
     public void NoteOn(int channel, int note, int velocity)
@@ -292,6 +295,7 @@ public sealed class OplSynth : IMidiSynth
 
         _lastPeakLeft = peakLeft;
         _lastPeakRight = peakRight;
+        Core.StepOutputSamples(frames, sampleRate);
     }
 
     public void CopyChannelMeters(Span<int> counts, Span<float> levels)
