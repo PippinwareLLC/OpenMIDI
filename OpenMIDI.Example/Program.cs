@@ -367,6 +367,16 @@ public static class Program
             Synth.NoteOff(channel, note, velocity);
         }
 
+        public void PolyAftertouch(int channel, int note, int pressure)
+        {
+            Synth.PolyAftertouch(channel, note, pressure);
+        }
+
+        public void ChannelAftertouch(int channel, int pressure)
+        {
+            Synth.ChannelAftertouch(channel, pressure);
+        }
+
         public void ControlChange(int channel, int controller, int value)
         {
             Synth.ControlChange(channel, controller, value);

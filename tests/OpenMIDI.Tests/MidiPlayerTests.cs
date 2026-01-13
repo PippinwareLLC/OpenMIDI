@@ -66,6 +66,14 @@ public sealed class MidiPlayerTests
             Events.Add(MidiEventKind.NoteOff);
         }
 
+        public void PolyAftertouch(int channel, int note, int pressure)
+        {
+        }
+
+        public void ChannelAftertouch(int channel, int pressure)
+        {
+        }
+
         public void ControlChange(int channel, int controller, int value)
         {
         }

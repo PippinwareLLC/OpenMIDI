@@ -150,11 +150,17 @@ public sealed class MidiPlayer
             case MidiEventKind.NoteOff:
                 _synth.NoteOff(midiEvent.Channel, midiEvent.Data1, midiEvent.Data2);
                 break;
+            case MidiEventKind.PolyAftertouch:
+                _synth.PolyAftertouch(midiEvent.Channel, midiEvent.Data1, midiEvent.Data2);
+                break;
             case MidiEventKind.ControlChange:
                 _synth.ControlChange(midiEvent.Channel, midiEvent.Data1, midiEvent.Data2);
                 break;
             case MidiEventKind.ProgramChange:
                 _synth.ProgramChange(midiEvent.Channel, midiEvent.Data1);
+                break;
+            case MidiEventKind.ChannelAftertouch:
+                _synth.ChannelAftertouch(midiEvent.Channel, midiEvent.Data1);
                 break;
             case MidiEventKind.PitchBend:
             {

@@ -18,6 +18,7 @@ OPL core render path with WOPL instrument bank support for program-based patch m
 - Tremolo and vibrato LFOs are implemented with depth control.
 - OPL rhythm mode and percussion channels (BD/SD/TT/CY/HH) are implemented.
 - Sustain pedal (CC64) is mapped to hold/release OPL voices.
+- Mod wheel (CC1) and aftertouch drive vibrato/tremolo modulation, with RPN pitch-bend range and portamento glide support.
 - OplSynth voice allocation prioritizes released notes, uses channel priority and instrument-aware scoring, and treats sustained notes as lower-priority steal candidates.
 - MIDI channel 10 percussion is mapped to OPL rhythm flags with reserved rhythm channels.
 - WOPL instrument banks can be loaded for program/bank-based patch mapping.
@@ -75,7 +76,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | MIDI instrument bank mapping | [ ] | [x] | [x] |
 | MIDI percussion mapping | [ ] | [x] | [x] |
 | Pitch bend and controller mapping (volume/expression/pan/sustain) | [x] | [x] | [x] |
-| Mod wheel/vibrato controller mapping | [ ] | [ ] | [ ] |
+| Mod wheel/vibrato controller mapping | [ ] | [x] | [x] |
 | Envelope rate table validation (ymfm) | [x] | [x] | [x] |
 | Register-level verification vs reference core | [ ] | [ ] | [ ] |
 

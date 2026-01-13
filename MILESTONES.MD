@@ -26,9 +26,9 @@ Parity target: Adlib (OPL2) and Sound Blaster (OPL2/OPL3) behavior.
 - [ ] Default GM/Adlib-style patch bank for MIDI program changes.
 - [x] Channel 10 percussion mapping to OPL rhythm mode.
 - [x] Controller mapping (volume, expression, pan, sustain).
-- [ ] Mod wheel/vibrato controller mapping.
+- [x] Mod wheel/vibrato controller mapping.
 - [x] Pitch bend mapping (configurable range).
-- [ ] Optional portamento/glide behavior.
+- [x] Optional portamento/glide behavior.
 
 ## Output + Mixing
 - [ ] Accurate output scaling, clipping, and DC offset handling.

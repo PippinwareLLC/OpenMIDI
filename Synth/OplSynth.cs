@@ -41,6 +41,11 @@ public sealed class OplSynth : IMidiSynth
         public int Note;
         public int OplNote;
         public int Velocity;
+        public int NoteAftertouch;
+        public bool GlideActive;
+        public double GlideCurrentNote;
+        public double GlideTargetNote;
+        public double GlideRate;
         public int Program;
         public byte BankMsb;
         public byte BankLsb;
@@ -59,10 +64,24 @@ public sealed class OplSynth : IMidiSynth
         public byte BankMsb;
         public byte BankLsb;
         public int PitchBend = 8192;
+        public float PitchBendRangeSemitones = 2f;
         public int Volume = 100;
         public int Expression = 127;
         public int Pan = 64;
         public bool SustainPedal;
+        public int ModWheel;
+        public int Aftertouch;
+        public byte[] NoteAftertouch = new byte[128];
+        public int RpnMsb = 127;
+        public int RpnLsb = 127;
+        public bool RpnIsNrpn;
+        public int RpnDataMsb;
+        public int RpnDataLsb;
+        public int PortamentoValue;
+        public bool PortamentoEnabled;
+        public int PortamentoSourceNote = -1;
+        public double PortamentoRate = double.PositiveInfinity;
+        public double ModulationPhase;
     }
 
     private const int MaxChipCount = 8;
@@ -80,6 +99,10 @@ public sealed class OplSynth : IMidiSynth
     private const byte VolumeModelHmiOld = 11;
     private const byte VolumeModelMsAdlib = 12;
     private const byte VolumeModelImfCreator = 13;
+    private const double VibratoDepthSemitonesPerUnit = 0.5 / 127.0;
+    private const double TremoloDepthPerUnit = 0.25 / 127.0;
+    private static readonly double ModulationSpeedRad = 2.0 * Math.PI * 5.0;
+    private static readonly double ModulationTwoPi = Math.PI * 2.0;
     private readonly OplCore[] _cores;
     private readonly int _channelsPerChip;
     private readonly OplVoice[] _voices;
@@ -174,6 +197,11 @@ public sealed class OplSynth : IMidiSynth
             voice.Note = 0;
             voice.OplNote = 0;
             voice.Velocity = 0;
+            voice.NoteAftertouch = 0;
+            voice.GlideActive = false;
+            voice.GlideCurrentNote = 0;
+            voice.GlideTargetNote = 0;
+            voice.GlideRate = double.PositiveInfinity;
             voice.Program = 0;
             voice.BankMsb = 0;
             voice.BankLsb = 0;
@@ -192,10 +220,24 @@ public sealed class OplSynth : IMidiSynth
             channel.BankMsb = 0;
             channel.BankLsb = 0;
             channel.PitchBend = 8192;
+            channel.PitchBendRangeSemitones = PitchBendRangeSemitones;
             channel.Volume = 100;
             channel.Expression = 127;
             channel.Pan = 64;
             channel.SustainPedal = false;
+            channel.ModWheel = 0;
+            channel.Aftertouch = 0;
+            Array.Clear(channel.NoteAftertouch, 0, channel.NoteAftertouch.Length);
+            channel.RpnMsb = 127;
+            channel.RpnLsb = 127;
+            channel.RpnIsNrpn = false;
+            channel.RpnDataMsb = 0;
+            channel.RpnDataLsb = 0;
+            channel.PortamentoValue = 0;
+            channel.PortamentoEnabled = false;
+            channel.PortamentoSourceNote = -1;
+            channel.PortamentoRate = double.PositiveInfinity;
+            channel.ModulationPhase = 0;
         }
 
         _ageCounter = 0;
@@ -235,7 +277,8 @@ public sealed class OplSynth : IMidiSynth
     }
 
     private void ConfigureVoiceForNote(OplVoice voice, int voiceIndex, int channel, int note, int oplNote,
-        int velocity, MidiChannelState channelState, OplInstrument instrument, bool fourOp, int secondaryOplChannel)
+        int velocity, MidiChannelState channelState, OplInstrument instrument, bool fourOp, int secondaryOplChannel,
+        bool portamentoEnabled, int portamentoSourceNote)
     {
         voice.Active = true;
         voice.KeyOn = true;
@@ -245,6 +288,11 @@ public sealed class OplSynth : IMidiSynth
         voice.Note = note;
         voice.OplNote = oplNote;
         voice.Velocity = velocity;
+        voice.NoteAftertouch = 0;
+        voice.GlideActive = false;
+        voice.GlideCurrentNote = oplNote;
+        voice.GlideTargetNote = oplNote;
+        voice.GlideRate = double.PositiveInfinity;
         voice.Program = channelState.Program;
         voice.BankMsb = channelState.BankMsb;
         voice.BankLsb = channelState.BankLsb;
@@ -253,6 +301,17 @@ public sealed class OplSynth : IMidiSynth
         voice.SecondaryOplChannel = secondaryOplChannel;
         voice.Age = _ageCounter++;
         InitializeVoiceTimers(voice, instrument);
+
+        int noteIndex = Math.Clamp(note, 0, 127);
+        voice.NoteAftertouch = channelState.NoteAftertouch[noteIndex];
+
+        if (portamentoEnabled && portamentoSourceNote >= 0)
+        {
+            voice.GlideCurrentNote = AdjustNote(portamentoSourceNote, instrument, isPercussion: false);
+            voice.GlideTargetNote = oplNote;
+            voice.GlideRate = channelState.PortamentoRate;
+            voice.GlideActive = voice.GlideRate > 0 && !double.IsInfinity(voice.GlideRate);
+        }
     }
 
     private static long GetInstrumentDelayUs(ushort delayMs)
@@ -307,6 +366,10 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        int portamentoSourceNote = channelState.PortamentoSourceNote;
+        bool portamentoEnabled = channelState.PortamentoEnabled && channelState.PortamentoRate < double.PositiveInfinity;
+        channelState.PortamentoSourceNote = note;
+
         bool wantsFourOp = IsFourOpInstrument(melodicInstrument) && _mode == OplSynthMode.Opl3;
         int reuseIndex = FindSameNoteVoiceIndex(channel, note, channelState.Program, channelState.BankMsb, channelState.BankLsb);
         if (reuseIndex >= 0 && wantsFourOp && !_voices[reuseIndex].FourOp)
@@ -337,7 +400,7 @@ public sealed class OplSynth : IMidiSynth
             }
 
             ConfigureVoiceForNote(reuseVoice, reuseIndex, channel, note, melodicNote, melodicVelocity, channelState,
-                melodicInstrument, useFourOp, secondaryChannel);
+                melodicInstrument, useFourOp, secondaryChannel, portamentoEnabled, portamentoSourceNote);
             ApplyChannelRegisters(reuseVoice, channelState);
             return;
         }
@@ -372,7 +435,7 @@ public sealed class OplSynth : IMidiSynth
 
         OplVoice voice = _voices[voiceIndex];
         ConfigureVoiceForNote(voice, voiceIndex, channel, note, melodicNote, melodicVelocity, channelState,
-            melodicInstrument, useFourOpVoice, secondaryOplChannel);
+            melodicInstrument, useFourOpVoice, secondaryOplChannel, portamentoEnabled, portamentoSourceNote);
         ApplyChannelRegisters(voice, channelState);
     }
 
@@ -405,6 +468,43 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    public void PolyAftertouch(int channel, int note, int pressure)
+    {
+        if (!IsValidChannel(channel))
+        {
+            return;
+        }
+
+        MidiChannelState channelState = _channels[channel];
+        int value = Math.Clamp(pressure, 0, 127);
+        int noteIndex = Math.Clamp(note, 0, 127);
+        channelState.NoteAftertouch[noteIndex] = (byte)value;
+
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || voice.MidiChannel != channel || voice.Note != note)
+            {
+                continue;
+            }
+
+            voice.NoteAftertouch = value;
+        }
+
+        UpdateChannelModulation(channel, channelState);
+    }
+
+    public void ChannelAftertouch(int channel, int pressure)
+    {
+        if (!IsValidChannel(channel))
+        {
+            return;
+        }
+
+        MidiChannelState channelState = _channels[channel];
+        channelState.Aftertouch = Math.Clamp(pressure, 0, 127);
+        UpdateChannelModulation(channel, channelState);
+    }
+
     public void ControlChange(int channel, int controller, int value)
     {
         if (!IsValidChannel(channel))
@@ -413,31 +513,75 @@ public sealed class OplSynth : IMidiSynth
         }
 
         MidiChannelState channelState = _channels[channel];
+        int clamped = Math.Clamp(value, 0, 127);
         switch (controller)
         {
+            case 1:
+                channelState.ModWheel = clamped;
+                UpdateChannelModulation(channel, channelState);
+                break;
             case 0:
-                channelState.BankMsb = (byte)Math.Clamp(value, 0, 127);
+                channelState.BankMsb = (byte)clamped;
                 break;
             case 32:
-                channelState.BankLsb = (byte)Math.Clamp(value, 0, 127);
+                channelState.BankLsb = (byte)clamped;
+                break;
+            case 5:
+                channelState.PortamentoValue = (channelState.PortamentoValue & 0x007F) | (clamped << 7);
+                UpdatePortamentoRate(channelState);
+                break;
+            case 37:
+                channelState.PortamentoValue = (channelState.PortamentoValue & 0x3F80) | clamped;
+                UpdatePortamentoRate(channelState);
+                break;
+            case 65:
+                channelState.PortamentoEnabled = clamped >= 64;
+                UpdatePortamentoRate(channelState);
                 break;
             case 7:
-                channelState.Volume = value;
+                channelState.Volume = clamped;
                 UpdateChannelGains(channel, channelState);
                 break;
             case 10:
-                channelState.Pan = value;
+                channelState.Pan = clamped;
                 UpdateChannelGains(channel, channelState);
                 break;
             case 11:
-                channelState.Expression = value;
+                channelState.Expression = clamped;
                 UpdateChannelGains(channel, channelState);
                 break;
             case 64:
                 if (!IsPercussionChannel(channel))
                 {
-                    UpdateSustainPedal(channel, channelState, value >= 64);
+                    UpdateSustainPedal(channel, channelState, clamped >= 64);
                 }
+                break;
+            case 98:
+                channelState.RpnLsb = clamped;
+                channelState.RpnIsNrpn = true;
+                break;
+            case 99:
+                channelState.RpnMsb = clamped;
+                channelState.RpnIsNrpn = true;
+                break;
+            case 100:
+                channelState.RpnLsb = clamped;
+                channelState.RpnIsNrpn = false;
+                break;
+            case 101:
+                channelState.RpnMsb = clamped;
+                channelState.RpnIsNrpn = false;
+                break;
+            case 6:
+                channelState.RpnDataMsb = clamped;
+                ApplyRpnData(channel, channelState);
+                break;
+            case 38:
+                channelState.RpnDataLsb = clamped;
+                ApplyRpnData(channel, channelState);
+                break;
+            case 121:
+                ResetChannelControllers(channel, channelState);
                 break;
             case 120:
             case 123:
@@ -523,6 +667,9 @@ public sealed class OplSynth : IMidiSynth
         _lastPeakLeft = peakLeft;
         _lastPeakRight = peakRight;
         AdvanceVoiceTiming(frames, sampleRate);
+        double deltaSeconds = sampleRate > 0 ? frames / (double)sampleRate : 0.0;
+        UpdateGlide(deltaSeconds);
+        UpdateModulation(deltaSeconds);
         UpdateChannelMeters();
     }
 
@@ -742,6 +889,58 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    private void ResetChannelControllers(int channel, MidiChannelState channelState)
+    {
+        channelState.PitchBend = 8192;
+        channelState.PitchBendRangeSemitones = PitchBendRangeSemitones;
+        channelState.Expression = 127;
+        channelState.SustainPedal = false;
+        channelState.ModWheel = 0;
+        channelState.Aftertouch = 0;
+        Array.Clear(channelState.NoteAftertouch, 0, channelState.NoteAftertouch.Length);
+        channelState.RpnMsb = 127;
+        channelState.RpnLsb = 127;
+        channelState.RpnIsNrpn = false;
+        channelState.RpnDataMsb = 0;
+        channelState.RpnDataLsb = 0;
+        channelState.PortamentoValue = 0;
+        channelState.PortamentoEnabled = false;
+        channelState.PortamentoSourceNote = -1;
+        channelState.PortamentoRate = double.PositiveInfinity;
+        channelState.ModulationPhase = 0;
+
+        ReleaseSustainedVoices(channel);
+        UpdateChannelGains(channel, channelState);
+        UpdateChannelFrequencies(channel, channelState);
+        UpdateChannelModulation(channel, channelState);
+    }
+
+    private void ApplyRpnData(int channel, MidiChannelState channelState)
+    {
+        if (channelState.RpnIsNrpn)
+        {
+            return;
+        }
+
+        if (channelState.RpnMsb == 0 && channelState.RpnLsb == 0)
+        {
+            float semitones = channelState.RpnDataMsb + channelState.RpnDataLsb / 100f;
+            channelState.PitchBendRangeSemitones = Math.Clamp(semitones, 0f, 96f);
+            UpdateChannelFrequencies(channel, channelState);
+        }
+    }
+
+    private void UpdatePortamentoRate(MidiChannelState channelState)
+    {
+        double rate = double.PositiveInfinity;
+        if (channelState.PortamentoEnabled && channelState.PortamentoValue > 0)
+        {
+            rate = 350.0 * Math.Pow(2.0, -0.062 * (1.0 / 128.0) * channelState.PortamentoValue);
+        }
+
+        channelState.PortamentoRate = rate;
+    }
+
     private void ReleaseSustainedVoices(int channel)
     {
         foreach (OplVoice voice in _voices)
@@ -792,7 +991,138 @@ public sealed class OplSynth : IMidiSynth
                 continue;
             }
 
-            SetChannelFrequency(voice.OplChannel, voice.OplNote, channelState, keyOn: voice.KeyOn);
+            UpdateVoiceFrequency(voice, channelState);
+        }
+    }
+
+    private void UpdateChannelModulation(int channel, MidiChannelState channelState)
+    {
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || voice.MidiChannel != channel)
+            {
+                continue;
+            }
+
+            UpdateVoiceFrequency(voice, channelState);
+            UpdateCarrierTotalLevel(voice, channelState);
+        }
+    }
+
+    private void UpdateGlide(double deltaSeconds)
+    {
+        if (deltaSeconds <= 0)
+        {
+            return;
+        }
+
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || !voice.GlideActive)
+            {
+                continue;
+            }
+
+            if (!IsValidChannel(voice.MidiChannel))
+            {
+                voice.GlideActive = false;
+                continue;
+            }
+
+            double rate = voice.GlideRate;
+            if (rate <= 0 || double.IsInfinity(rate))
+            {
+                voice.GlideActive = false;
+                continue;
+            }
+
+            double previous = voice.GlideCurrentNote;
+            double target = voice.GlideTargetNote;
+            bool directionUp = previous < target;
+            double next = previous + (directionUp ? rate : -rate) * deltaSeconds;
+            bool finished = directionUp ? next >= target : next <= target;
+            if (finished)
+            {
+                next = target;
+                voice.GlideActive = false;
+            }
+
+            if (Math.Abs(next - previous) < 1e-6)
+            {
+                continue;
+            }
+
+            voice.GlideCurrentNote = next;
+            MidiChannelState channelState = _channels[voice.MidiChannel];
+            UpdateVoiceFrequency(voice, channelState);
+        }
+    }
+
+    private void UpdateModulation(double deltaSeconds)
+    {
+        if (deltaSeconds <= 0)
+        {
+            return;
+        }
+
+        Span<bool> noteAftertouch = stackalloc bool[_channels.Length];
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || !voice.KeyOn || voice.NoteAftertouch <= 0)
+            {
+                continue;
+            }
+
+            int channel = voice.MidiChannel;
+            if (channel >= 0 && channel < noteAftertouch.Length)
+            {
+                noteAftertouch[channel] = true;
+            }
+        }
+
+        bool anyModulation = false;
+        double phaseStep = deltaSeconds * ModulationSpeedRad;
+        for (int i = 0; i < _channels.Length; i++)
+        {
+            MidiChannelState channelState = _channels[i];
+            bool hasModulation = channelState.ModWheel > 0 || channelState.Aftertouch > 0 || noteAftertouch[i];
+            if (hasModulation)
+            {
+                channelState.ModulationPhase = AdvancePhase(channelState.ModulationPhase, phaseStep);
+                anyModulation = true;
+            }
+            else
+            {
+                channelState.ModulationPhase = 0;
+            }
+        }
+
+        if (!anyModulation)
+        {
+            return;
+        }
+
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active)
+            {
+                continue;
+            }
+
+            int channel = voice.MidiChannel;
+            if (!IsValidChannel(channel))
+            {
+                continue;
+            }
+
+            MidiChannelState channelState = _channels[channel];
+            if (GetModulationValue(channelState, voice) <= 0)
+            {
+                continue;
+            }
+
+            UpdateVoiceFrequency(voice, channelState);
+            UpdateCarrierTotalLevel(voice, channelState);
         }
     }
 
@@ -1052,7 +1382,7 @@ public sealed class OplSynth : IMidiSynth
     private void ApplyChannelRegisters(OplVoice voice, MidiChannelState channelState)
     {
         ConfigureChannelOperators(voice, channelState);
-        SetChannelFrequency(voice.OplChannel, voice.OplNote, channelState, keyOn: true);
+        UpdateVoiceFrequency(voice, channelState);
     }
 
     private void ConfigureChannelOperators(OplVoice voice, MidiChannelState channelState)
@@ -1083,7 +1413,7 @@ public sealed class OplSynth : IMidiSynth
 
             WriteOperatorRegister(core, channel.CarrierIndex, 0x20, carrier1.AmVibEgtKsrMult);
             WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier1.KslTl));
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier1.KslTl, voice));
             WriteOperatorRegister(core, channel.CarrierIndex, 0x60, carrier1.ArDr);
             WriteOperatorRegister(core, channel.CarrierIndex, 0x80, carrier1.SlRr);
             WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, carrier1.Waveform);
@@ -1096,7 +1426,7 @@ public sealed class OplSynth : IMidiSynth
 
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x20, carrier2.AmVibEgtKsrMult);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl));
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl, voice));
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x60, carrier2.ArDr);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x80, carrier2.SlRr);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0xE0, carrier2.Waveform);
@@ -1133,7 +1463,7 @@ public sealed class OplSynth : IMidiSynth
 
         OplOperatorPatch carrier = GetOperatorPatch(voice.Instrument, 0, OplInstrumentDefaults.DefaultCarrier);
         WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
-            ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl));
+            ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl, voice));
 
         if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
             TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out _, out OplChannel secondaryChannel))
@@ -1145,21 +1475,41 @@ public sealed class OplSynth : IMidiSynth
 
             OplOperatorPatch carrier2 = GetOperatorPatch(voice.Instrument, 2, OplInstrumentDefaults.DefaultCarrier);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl));
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl, voice));
         }
     }
 
-    private byte ComputeCarrierTotalLevel(MidiChannelState channelState, int velocity, byte baseKslTl)
+    private byte ComputeCarrierTotalLevel(MidiChannelState channelState, int velocity, byte baseKslTl, OplVoice? voice = null)
     {
         float velocityGain = Math.Clamp(velocity / 127f, 0f, 1f);
         float gain = velocityGain * GetChannelGain(channelState);
+        if (voice != null)
+        {
+            gain *= GetTremoloGain(channelState, voice);
+        }
+
+        gain = Math.Clamp(gain, 0f, 1f);
         int attenuation = (int)Math.Round((1f - gain) * 63f);
         int baseTl = baseKslTl & 0x3F;
         int total = Math.Clamp(baseTl + attenuation, 0, 63);
         return (byte)((baseKslTl & 0xC0) | total);
     }
 
-    private void SetChannelFrequency(int oplChannel, int note, MidiChannelState channelState, bool keyOn)
+    private void UpdateVoiceFrequency(OplVoice voice, MidiChannelState channelState)
+    {
+        if (!TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
+        {
+            return;
+        }
+
+        double noteValue = voice.GlideActive ? voice.GlideCurrentNote : voice.OplNote;
+        noteValue += GetVibratoOffset(channelState, voice);
+        double frequency = GetFrequency(channelState, noteValue);
+        ComputeBlockAndFnum(frequency, out int block, out int fnum);
+        WriteFrequency(core, localChannel, fnum, block, voice.KeyOn);
+    }
+
+    private void SetChannelFrequency(int oplChannel, double note, MidiChannelState channelState, bool keyOn)
     {
         if (!TryGetCore(oplChannel, out OplCore core, out int localChannel))
         {
@@ -1301,6 +1651,11 @@ public sealed class OplSynth : IMidiSynth
         voice.KeyOnRemainingUs = 0;
         voice.KeyOffRemainingUs = 0;
         voice.VibDelayUs = 0;
+        voice.NoteAftertouch = 0;
+        voice.GlideActive = false;
+        voice.GlideCurrentNote = 0;
+        voice.GlideTargetNote = 0;
+        voice.GlideRate = double.PositiveInfinity;
 
         if (wasFourOp)
         {
@@ -2062,10 +2417,72 @@ public sealed class OplSynth : IMidiSynth
         return operators[index];
     }
 
-    private double GetFrequency(MidiChannelState channelState, int note)
+    private static double AdvancePhase(double phase, double delta)
+    {
+        double next = phase + delta;
+        if (next >= ModulationTwoPi || next <= -ModulationTwoPi)
+        {
+            next %= ModulationTwoPi;
+        }
+
+        if (next < 0)
+        {
+            next += ModulationTwoPi;
+        }
+
+        return next;
+    }
+
+    private int GetModulationValue(MidiChannelState channelState, OplVoice voice)
+    {
+        if (!voice.KeyOn || IsPercussionChannel(voice.MidiChannel))
+        {
+            return 0;
+        }
+
+        int value = channelState.ModWheel;
+        if (channelState.Aftertouch > value)
+        {
+            value = channelState.Aftertouch;
+        }
+
+        if (voice.NoteAftertouch > value)
+        {
+            value = voice.NoteAftertouch;
+        }
+
+        return value;
+    }
+
+    private double GetVibratoOffset(MidiChannelState channelState, OplVoice voice)
+    {
+        int modulation = GetModulationValue(channelState, voice);
+        if (modulation <= 0)
+        {
+            return 0.0;
+        }
+
+        return modulation * VibratoDepthSemitonesPerUnit * Math.Sin(channelState.ModulationPhase);
+    }
+
+    private float GetTremoloGain(MidiChannelState channelState, OplVoice voice)
+    {
+        int modulation = GetModulationValue(channelState, voice);
+        if (modulation <= 0)
+        {
+            return 1f;
+        }
+
+        float depth = (float)(modulation * TremoloDepthPerUnit);
+        float lfo = (float)Math.Sin(channelState.ModulationPhase);
+        float amount = 0.5f + 0.5f * lfo;
+        return Math.Clamp(1f - depth * amount, 0f, 1f);
+    }
+
+    private double GetFrequency(MidiChannelState channelState, double note)
     {
         double bend = (channelState.PitchBend - 8192) / 8192.0;
-        double bendSemitones = bend * PitchBendRangeSemitones;
+        double bendSemitones = bend * channelState.PitchBendRangeSemitones;
         double noteValue = note + bendSemitones;
         return 440.0 * Math.Pow(2.0, (noteValue - 69.0) / 12.0);
     }
