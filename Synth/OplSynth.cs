@@ -37,6 +37,9 @@ public sealed class OplSynth : IMidiSynth
         public bool SustainPedal;
     }
 
+    private const int MaxChipCount = 8;
+    private readonly OplCore[] _cores;
+    private readonly int _channelsPerChip;
     private readonly OplVoice[] _voices;
     private readonly MidiChannelState[] _channels;
     private readonly OplSynthMode _mode;
@@ -51,6 +54,7 @@ public sealed class OplSynth : IMidiSynth
     private int _sameNoteReuseCount;
     private int _releaseReuseCount;
     private int _voiceStealCount;
+    private float[] _mixBuffer = Array.Empty<float>();
 
     private const byte DefaultFeedback = 2;
     private const byte ModAmVibEgtKsrMult = 0x21;
@@ -70,10 +74,19 @@ public sealed class OplSynth : IMidiSynth
         0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21
     };
 
-    public OplSynth(OplSynthMode mode = OplSynthMode.Opl3)
+    public OplSynth(OplSynthMode mode = OplSynthMode.Opl3, int chips = 1)
     {
         _mode = mode;
-        int voiceCount = mode == OplSynthMode.Opl3 ? 18 : 9;
+        int chipCount = Math.Clamp(chips, 1, MaxChipCount);
+        OplChipType chipType = mode == OplSynthMode.Opl3 ? OplChipType.Opl3 : OplChipType.Opl2;
+        _channelsPerChip = chipType == OplChipType.Opl3 ? 18 : 9;
+        _cores = new OplCore[chipCount];
+        for (int i = 0; i < _cores.Length; i++)
+        {
+            _cores[i] = new OplCore(chipType);
+        }
+
+        int voiceCount = _channelsPerChip * chipCount;
         _voices = new OplVoice[voiceCount];
         for (int i = 0; i < _voices.Length; i++)
         {
@@ -88,7 +101,6 @@ public sealed class OplSynth : IMidiSynth
 
         _channelActiveCounts = new int[16];
         _channelLevels = new float[16];
-        Core = new OplCore(mode == OplSynthMode.Opl3 ? OplChipType.Opl3 : OplChipType.Opl2);
         Reset();
     }
 
@@ -96,6 +108,7 @@ public sealed class OplSynth : IMidiSynth
     public float AttackPerSecond { get; set; } = 6f;
     public float ReleasePerSecond { get; set; } = 3f;
     public float PitchBendRangeSemitones { get; set; } = 2f;
+    public int ChipCount => _cores.Length;
     public int VoiceCount => _voices.Length;
     public int ActiveVoiceCount => _activeVoiceCount;
     public int PeakActiveVoiceCount => _peakActiveVoiceCount;
@@ -105,7 +118,8 @@ public sealed class OplSynth : IMidiSynth
     public int SameNoteReuseCount => _sameNoteReuseCount;
     public int ReleaseReuseCount => _releaseReuseCount;
     public int VoiceStealCount => _voiceStealCount;
-    public OplCore Core { get; }
+    public OplCore Core => _cores[0];
+    public IReadOnlyList<OplCore> Cores => _cores;
 
     public void Reset()
     {
@@ -142,11 +156,13 @@ public sealed class OplSynth : IMidiSynth
         _voiceStealCount = 0;
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
-        Core.Reset();
-
-        if (_mode == OplSynthMode.Opl3)
+        foreach (OplCore core in _cores)
         {
-            Core.WriteRegister(0x105, 0x01);
+            core.Reset();
+            if (_mode == OplSynthMode.Opl3)
+            {
+                core.WriteRegister(0x105, 0x01);
+            }
         }
     }
 
@@ -291,7 +307,29 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
-        Core.Render(interleaved, offset, frames, sampleRate);
+        if (_cores.Length == 1)
+        {
+            _cores[0].Render(interleaved, offset, frames, sampleRate);
+        }
+        else
+        {
+            int sampleCount = frames * 2;
+            if (_mixBuffer.Length < sampleCount)
+            {
+                _mixBuffer = new float[sampleCount];
+            }
+
+            Array.Clear(interleaved, offset, sampleCount);
+            foreach (OplCore core in _cores)
+            {
+                Array.Clear(_mixBuffer, 0, sampleCount);
+                core.Render(_mixBuffer, 0, frames, sampleRate);
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    interleaved[offset + i] += _mixBuffer[i];
+                }
+            }
+        }
 
         float peakLeft = 0f;
         float peakRight = 0f;
@@ -506,7 +544,10 @@ public sealed class OplSynth : IMidiSynth
             }
 
             UpdateCarrierTotalLevel(voice, channelState);
-            WriteChannelFeedback(voice.OplChannel, channelState);
+            if (TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
+            {
+                WriteChannelFeedback(core, localChannel, channelState);
+            }
         }
     }
 
@@ -563,24 +604,55 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    private bool TryGetCore(int oplChannel, out OplCore core, out int localChannel)
+    {
+        core = null!;
+        localChannel = 0;
+        if (oplChannel < 0)
+        {
+            return false;
+        }
+
+        int chipIndex = oplChannel / _channelsPerChip;
+        if (chipIndex < 0 || chipIndex >= _cores.Length)
+        {
+            return false;
+        }
+
+        core = _cores[chipIndex];
+        localChannel = oplChannel - chipIndex * _channelsPerChip;
+        return localChannel >= 0 && localChannel < core.Channels.Count;
+    }
+
+    private bool TryGetChannel(int oplChannel, out OplCore core, out int localChannel, out OplChannel channel)
+    {
+        channel = null!;
+        if (!TryGetCore(oplChannel, out core, out localChannel))
+        {
+            return false;
+        }
+
+        channel = core.Channels[localChannel];
+        return true;
+    }
+
     private bool TryGetVoiceEnvelopeLevel(OplVoice voice, out float level, out bool isOff)
     {
-        if (voice.OplChannel < 0 || voice.OplChannel >= Core.Channels.Count)
+        if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel channel))
         {
             level = 0f;
             isOff = true;
             return false;
         }
 
-        OplChannel channel = Core.Channels[voice.OplChannel];
-        if (channel.CarrierIndex < 0 || channel.CarrierIndex >= Core.Operators.Count)
+        if (channel.CarrierIndex < 0 || channel.CarrierIndex >= core.Operators.Count)
         {
             level = 0f;
             isOff = true;
             return false;
         }
 
-        OplEnvelope envelope = Core.Operators[channel.CarrierIndex].Envelope;
+        OplEnvelope envelope = core.Operators[channel.CarrierIndex].Envelope;
         level = envelope.Level;
         isOff = envelope.Stage == OplEnvelopeStage.Off;
         return true;
@@ -594,36 +666,34 @@ public sealed class OplSynth : IMidiSynth
 
     private void ConfigureChannelOperators(OplVoice voice, MidiChannelState channelState)
     {
-        if (voice.OplChannel < 0 || voice.OplChannel >= Core.Channels.Count)
+        if (!TryGetChannel(voice.OplChannel, out OplCore core, out int localChannel, out OplChannel channel))
         {
             return;
         }
 
-        OplChannel channel = Core.Channels[voice.OplChannel];
-        WriteOperatorRegister(channel.ModulatorIndex, 0x20, ModAmVibEgtKsrMult);
-        WriteOperatorRegister(channel.ModulatorIndex, 0x40, ModKslTl);
-        WriteOperatorRegister(channel.ModulatorIndex, 0x60, ModArDr);
-        WriteOperatorRegister(channel.ModulatorIndex, 0x80, ModSlRr);
-        WriteOperatorRegister(channel.ModulatorIndex, 0xE0, ModWaveform);
+        WriteOperatorRegister(core, channel.ModulatorIndex, 0x20, ModAmVibEgtKsrMult);
+        WriteOperatorRegister(core, channel.ModulatorIndex, 0x40, ModKslTl);
+        WriteOperatorRegister(core, channel.ModulatorIndex, 0x60, ModArDr);
+        WriteOperatorRegister(core, channel.ModulatorIndex, 0x80, ModSlRr);
+        WriteOperatorRegister(core, channel.ModulatorIndex, 0xE0, ModWaveform);
 
-        WriteOperatorRegister(channel.CarrierIndex, 0x20, CarAmVibEgtKsrMult);
-        WriteOperatorRegister(channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity));
-        WriteOperatorRegister(channel.CarrierIndex, 0x60, CarArDr);
-        WriteOperatorRegister(channel.CarrierIndex, 0x80, CarSlRr);
-        WriteOperatorRegister(channel.CarrierIndex, 0xE0, CarWaveform);
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x20, CarAmVibEgtKsrMult);
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity));
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x60, CarArDr);
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x80, CarSlRr);
+        WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, CarWaveform);
 
-        WriteChannelFeedback(voice.OplChannel, channelState);
+        WriteChannelFeedback(core, localChannel, channelState);
     }
 
     private void UpdateCarrierTotalLevel(OplVoice voice, MidiChannelState channelState)
     {
-        if (voice.OplChannel < 0 || voice.OplChannel >= Core.Channels.Count)
+        if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel channel))
         {
             return;
         }
 
-        OplChannel channel = Core.Channels[voice.OplChannel];
-        WriteOperatorRegister(channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity));
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity));
     }
 
     private byte ComputeCarrierTotalLevel(MidiChannelState channelState, int velocity)
@@ -638,9 +708,14 @@ public sealed class OplSynth : IMidiSynth
 
     private void SetChannelFrequency(int oplChannel, int note, MidiChannelState channelState, bool keyOn)
     {
+        if (!TryGetCore(oplChannel, out OplCore core, out int localChannel))
+        {
+            return;
+        }
+
         double frequency = GetFrequency(channelState, note);
         ComputeBlockAndFnum(frequency, out int block, out int fnum);
-        WriteFrequency(oplChannel, fnum, block, keyOn);
+        WriteFrequency(core, localChannel, fnum, block, keyOn);
     }
 
     private void ComputeBlockAndFnum(double frequency, out int block, out int fnum)
@@ -658,17 +733,17 @@ public sealed class OplSynth : IMidiSynth
         fnum = Math.Clamp(fnum, 0, 1023);
     }
 
-    private void WriteFrequency(int channelIndex, int fnum, int block, bool keyOn)
+    private void WriteFrequency(OplCore core, int channelIndex, int fnum, int block, bool keyOn)
     {
         int baseA0 = GetChannelAddress(channelIndex, 0xA0);
         int baseB0 = GetChannelAddress(channelIndex, 0xB0);
 
-        Core.WriteRegister(baseA0, (byte)(fnum & 0xFF));
+        core.WriteRegister(baseA0, (byte)(fnum & 0xFF));
         byte high = (byte)(((fnum >> 8) & 0x03) | ((block & 0x07) << 2) | (keyOn ? 0x20 : 0x00));
-        Core.WriteRegister(baseB0, high);
+        core.WriteRegister(baseB0, high);
     }
 
-    private void WriteChannelFeedback(int channelIndex, MidiChannelState channelState)
+    private void WriteChannelFeedback(OplCore core, int channelIndex, MidiChannelState channelState)
     {
         byte feedback = (byte)(DefaultFeedback << 1);
         byte value = feedback;
@@ -687,10 +762,10 @@ public sealed class OplSynth : IMidiSynth
             }
         }
 
-        Core.WriteRegister(GetChannelAddress(channelIndex, 0xC0), value);
+        core.WriteRegister(GetChannelAddress(channelIndex, 0xC0), value);
     }
 
-    private void WriteOperatorRegister(int opIndex, int groupBase, byte value)
+    private void WriteOperatorRegister(OplCore core, int opIndex, int groupBase, byte value)
     {
         if (opIndex < 0)
         {
@@ -706,7 +781,7 @@ public sealed class OplSynth : IMidiSynth
 
         int offset = OperatorIndexToOffset[local];
         int address = groupBase + offset + bank * 0x100;
-        Core.WriteRegister(address, value);
+        core.WriteRegister(address, value);
     }
 
     private int GetChannelAddress(int channelIndex, int baseAddress)
@@ -726,11 +801,9 @@ public sealed class OplSynth : IMidiSynth
         voice.KeyOn = false;
         voice.Sustained = false;
 
-        int oplChannel = voice.OplChannel;
-        if (oplChannel >= 0 && oplChannel < Core.Channels.Count)
+        if (TryGetChannel(voice.OplChannel, out OplCore core, out int localChannel, out OplChannel channel))
         {
-            OplChannel channel = Core.Channels[oplChannel];
-            WriteFrequency(oplChannel, channel.FNum, channel.Block, keyOn: false);
+            WriteFrequency(core, localChannel, channel.FNum, channel.Block, keyOn: false);
         }
     }
 

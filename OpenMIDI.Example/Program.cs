@@ -13,10 +13,11 @@ public static class Program
     private const int SampleRate = 44100;
     private const int Channels = 2;
     private const int BufferFrames = 1024;
+    private const int DefaultChipCount = 1;
 
     public static int Main(string[] args)
     {
-        if (!TryResolveMidiPath(args, out string midiPath, out int exitCode))
+        if (!TryResolveOptions(args, out string midiPath, out int chipCount, out int exitCode))
         {
             return exitCode;
         }
@@ -34,7 +35,7 @@ public static class Program
         }
 
         MidiFile midi = MidiFile.Load(midiPath);
-        OplSynth synth = new OplSynth(OplSynthMode.Opl3);
+        OplSynth synth = new OplSynth(OplSynthMode.Opl3, chipCount);
         MidiPlayer player = new MidiPlayer(synth);
         player.Load(midi);
 
@@ -62,7 +63,7 @@ public static class Program
                 return 1;
             }
 
-            Console.WriteLine($"Playing {Path.GetFileName(midiPath)} at {obtained.freq} Hz.");
+            Console.WriteLine($"Playing {Path.GetFileName(midiPath)} at {obtained.freq} Hz (chips {synth.ChipCount}).");
             SDL.SDL_PauseAudioDevice(device, 0);
 
             while (SDL.SDL_GetAudioDeviceStatus(device) == SDL.SDL_AudioStatus.SDL_AUDIO_PLAYING)
@@ -94,10 +95,12 @@ public static class Program
         return 0;
     }
 
-    private static bool TryResolveMidiPath(string[] args, out string midiPath, out int exitCode)
+    private static bool TryResolveOptions(string[] args, out string midiPath, out int chipCount, out int exitCode)
     {
         midiPath = string.Empty;
+        chipCount = DefaultChipCount;
         exitCode = 0;
+        bool chipCountSet = false;
 
         if (args.Length == 0)
         {
@@ -133,6 +136,38 @@ public static class Program
                 }
 
                 midiPath = args[++i];
+                continue;
+            }
+
+            if (arg is "--chips" or "--chip-count" or "--opl-chips")
+            {
+                if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith('-'))
+                {
+                    Console.WriteLine($"Missing chip count after {arg}.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                if (chipCountSet)
+                {
+                    Console.WriteLine("Multiple chip counts provided.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                if (!int.TryParse(args[i + 1], out int parsed) || parsed <= 0)
+                {
+                    Console.WriteLine($"Invalid chip count: {args[i + 1]}");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                chipCount = parsed;
+                chipCountSet = true;
+                i++;
                 continue;
             }
 
@@ -177,6 +212,7 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  -f, --file, --midi   Path to a .mid file.");
+        Console.WriteLine("  --chips <count>      Number of OPL chips to emulate (default 1).");
         Console.WriteLine("  -h, --help           Show this help.");
         Console.WriteLine();
         Console.WriteLine("If no path is provided, Test1.mid from the output folder is used.");
@@ -274,7 +310,7 @@ public static class Program
             StringBuilder builder = new StringBuilder();
             builder.AppendLine(PadLine($"OpenMIDI OPL Status - {Path.GetFileName(_midiPath)}", _lineWidth));
             builder.AppendLine(PadLine(
-                $"Time {_state.Player.CurrentTimeSeconds:0.00}/{_state.Player.DurationSeconds:0.00}s  Voices {_state.Synth.ActiveVoiceCount}/{_state.Synth.VoiceCount}",
+                $"Time {_state.Player.CurrentTimeSeconds:0.00}/{_state.Player.DurationSeconds:0.00}s  Voices {_state.Synth.ActiveVoiceCount}/{_state.Synth.VoiceCount}  Chips {_state.Synth.ChipCount}",
                 _lineWidth));
             builder.AppendLine(PadLine(
                 $"VU L {FormatBar(_state.Synth.LastPeakLeft, VuBarWidth)} {_state.Synth.LastPeakLeft:0.00}  R {FormatBar(_state.Synth.LastPeakRight, VuBarWidth)} {_state.Synth.LastPeakRight:0.00}",

@@ -35,6 +35,11 @@ Play a specific file:
 dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid
 ```
 
+Play with multiple OPL chips (higher polyphony):
+```
+dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid --chips 2
+```
+
 ## Parity Matrix (Target: Adlib/Sound Blaster)
 This matrix tracks parity goals for OPL1/OPL2/OPL3 behavior. The current synth
 is a stub, so these are largely unchecked until the register-accurate core
