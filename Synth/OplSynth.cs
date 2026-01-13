@@ -8,6 +8,13 @@ public enum OplSynthMode
 
 public sealed class OplSynth : IMidiSynth
 {
+    private enum VoiceAllocationKind
+    {
+        Free,
+        ReleaseReuse,
+        Steal
+    }
+
     private sealed class OplVoice
     {
         public bool Active;
@@ -37,8 +44,13 @@ public sealed class OplSynth : IMidiSynth
     private readonly int[] _channelActiveCounts;
     private readonly float[] _channelLevels;
     private int _activeVoiceCount;
+    private int _peakActiveVoiceCount;
     private float _lastPeakLeft;
     private float _lastPeakRight;
+    private int _noteOnCount;
+    private int _sameNoteReuseCount;
+    private int _releaseReuseCount;
+    private int _voiceStealCount;
 
     private const byte DefaultFeedback = 2;
     private const byte ModAmVibEgtKsrMult = 0x21;
@@ -86,8 +98,13 @@ public sealed class OplSynth : IMidiSynth
     public float PitchBendRangeSemitones { get; set; } = 2f;
     public int VoiceCount => _voices.Length;
     public int ActiveVoiceCount => _activeVoiceCount;
+    public int PeakActiveVoiceCount => _peakActiveVoiceCount;
     public float LastPeakLeft => _lastPeakLeft;
     public float LastPeakRight => _lastPeakRight;
+    public int NoteOnCount => _noteOnCount;
+    public int SameNoteReuseCount => _sameNoteReuseCount;
+    public int ReleaseReuseCount => _releaseReuseCount;
+    public int VoiceStealCount => _voiceStealCount;
     public OplCore Core { get; }
 
     public void Reset()
@@ -116,8 +133,13 @@ public sealed class OplSynth : IMidiSynth
 
         _ageCounter = 0;
         _activeVoiceCount = 0;
+        _peakActiveVoiceCount = 0;
         _lastPeakLeft = 0f;
         _lastPeakRight = 0f;
+        _noteOnCount = 0;
+        _sameNoteReuseCount = 0;
+        _releaseReuseCount = 0;
+        _voiceStealCount = 0;
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
         Core.Reset();
@@ -142,7 +164,36 @@ public sealed class OplSynth : IMidiSynth
         }
 
         MidiChannelState channelState = _channels[channel];
-        int voiceIndex = AllocateVoiceIndex();
+        _noteOnCount++;
+
+        int reuseIndex = FindSameNoteVoiceIndex(channel, note);
+        if (reuseIndex >= 0)
+        {
+            _sameNoteReuseCount++;
+            OplVoice reuseVoice = _voices[reuseIndex];
+            KeyOffVoice(reuseVoice);
+            reuseVoice.Active = true;
+            reuseVoice.KeyOn = true;
+            reuseVoice.Sustained = false;
+            reuseVoice.MidiChannel = channel;
+            reuseVoice.Note = note;
+            reuseVoice.Velocity = velocity;
+            reuseVoice.OplChannel = reuseIndex;
+            reuseVoice.Age = _ageCounter++;
+            ApplyChannelRegisters(reuseVoice, channelState);
+            return;
+        }
+
+        int voiceIndex = AllocateVoiceIndex(out VoiceAllocationKind allocationKind);
+        if (allocationKind == VoiceAllocationKind.ReleaseReuse)
+        {
+            _releaseReuseCount++;
+        }
+        else if (allocationKind == VoiceAllocationKind.Steal)
+        {
+            _voiceStealCount++;
+        }
+
         OplVoice voice = _voices[voiceIndex];
         voice.Active = true;
         voice.KeyOn = true;
@@ -277,12 +328,13 @@ public sealed class OplSynth : IMidiSynth
         _channelLevels.AsSpan(0, levelLength).CopyTo(levels);
     }
 
-    private int AllocateVoiceIndex()
+    private int AllocateVoiceIndex(out VoiceAllocationKind allocationKind)
     {
         for (int i = 0; i < _voices.Length; i++)
         {
             if (!_voices[i].Active)
             {
+                allocationKind = VoiceAllocationKind.Free;
                 return i;
             }
         }
@@ -293,6 +345,7 @@ public sealed class OplSynth : IMidiSynth
             _voices[reuseIndex].Active = false;
             _voices[reuseIndex].KeyOn = false;
             _voices[reuseIndex].Sustained = false;
+            allocationKind = VoiceAllocationKind.ReleaseReuse;
             return reuseIndex;
         }
 
@@ -301,7 +354,33 @@ public sealed class OplSynth : IMidiSynth
         _voices[stealIndex].Active = false;
         _voices[stealIndex].KeyOn = false;
         _voices[stealIndex].Sustained = false;
+        allocationKind = VoiceAllocationKind.Steal;
         return stealIndex;
+    }
+
+    private int FindSameNoteVoiceIndex(int channel, int note)
+    {
+        int candidate = -1;
+        for (int i = 0; i < _voices.Length; i++)
+        {
+            OplVoice voice = _voices[i];
+            if (!voice.Active || voice.MidiChannel != channel || voice.Note != note)
+            {
+                continue;
+            }
+
+            if (voice.KeyOn)
+            {
+                return i;
+            }
+
+            if (candidate < 0)
+            {
+                candidate = i;
+            }
+        }
+
+        return candidate;
     }
 
     private int FindReusableVoiceIndex()
@@ -476,6 +555,11 @@ public sealed class OplSynth : IMidiSynth
                 _channelActiveCounts[voice.MidiChannel]++;
                 _channelLevels[voice.MidiChannel] += level;
             }
+        }
+
+        if (_activeVoiceCount > _peakActiveVoiceCount)
+        {
+            _peakActiveVoiceCount = _activeVoiceCount;
         }
     }
 
