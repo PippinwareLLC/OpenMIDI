@@ -2,7 +2,7 @@
 
 OpenMIDI is a pure C# MIDI loader and playback path that targets classic OPL
 (Adlib/Sound Blaster) synthesis. MIDI playback now drives the register-accurate
-OPL core render path with a default 2-op patch while instrument mapping is expanded.
+OPL core render path with WOPL instrument bank support for program-based patch mapping.
 
 ## Status
 - MIDI parsing and event scheduling are implemented.
@@ -20,6 +20,7 @@ OPL core render path with a default 2-op patch while instrument mapping is expan
 - Sustain pedal (CC64) is mapped to hold/release OPL voices.
 - OplSynth voice allocation prioritizes released notes, uses channel priority and instrument-aware scoring, and treats sustained notes as lower-priority steal candidates.
 - MIDI channel 10 percussion is mapped to OPL rhythm flags with reserved rhythm channels.
+- WOPL instrument banks can be loaded for program/bank-based patch mapping.
 - Reference render clip tests cover the OPL core output.
 
 ## Quickstart
@@ -43,6 +44,16 @@ Play with multiple OPL chips (higher polyphony):
 dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid --chips 2
 ```
 
+Play with a custom WOPL bank:
+```
+dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid --bank path\to\bank.wopl
+```
+
+Boost output gain (default is 1.0 / chip count):
+```
+dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid --gain 1.0
+```
+
 ## Parity Matrix (Target: Adlib/Sound Blaster)
 This matrix tracks parity goals for OPL1/OPL2/OPL3 behavior. The current synth
 is a stub, so these are largely unchecked until the register-accurate core
@@ -61,7 +72,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [x] | [x] |
 | 4-operator channel pairing | [ ] | [ ] | [ ] |
 | Stereo output routing | [ ] | [ ] | [x] |
-| MIDI instrument bank mapping | [ ] | [ ] | [ ] |
+| MIDI instrument bank mapping | [ ] | [x] | [x] |
 | MIDI percussion mapping | [ ] | [x] | [x] |
 | Pitch bend and controller mapping (volume/expression/pan/sustain) | [x] | [x] | [x] |
 | Mod wheel/vibrato controller mapping | [ ] | [ ] | [ ] |

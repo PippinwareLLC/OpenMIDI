@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -17,7 +18,7 @@ public static class Program
 
     public static int Main(string[] args)
     {
-        if (!TryResolveOptions(args, out string midiPath, out int chipCount, out int exitCode))
+        if (!TryResolveOptions(args, out string midiPath, out int chipCount, out string bankPath, out float gain, out int exitCode))
         {
             return exitCode;
         }
@@ -36,6 +37,25 @@ public static class Program
 
         MidiFile midi = MidiFile.Load(midiPath);
         OplSynth synth = new OplSynth(OplSynthMode.Opl3, chipCount);
+        synth.MasterGain = gain;
+        if (!string.IsNullOrWhiteSpace(bankPath))
+        {
+            if (!File.Exists(bankPath))
+            {
+                Console.WriteLine($"Missing bank file: {bankPath}");
+                return 1;
+            }
+
+            try
+            {
+                synth.LoadBank(WoplBankLoader.LoadFromFile(bankPath));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to load bank {bankPath}: {ex.Message}");
+                return 1;
+            }
+        }
         MidiChannelNoteTracker noteTracker = new MidiChannelNoteTracker();
         TrackingSynth trackingSynth = new TrackingSynth(synth, noteTracker);
         MidiPlayer player = new MidiPlayer(trackingSynth);
@@ -65,7 +85,7 @@ public static class Program
                 return 1;
             }
 
-            Console.WriteLine($"Playing {Path.GetFileName(midiPath)} at {obtained.freq} Hz (chips {synth.ChipCount}).");
+            Console.WriteLine($"Playing {Path.GetFileName(midiPath)} at {obtained.freq} Hz (chips {synth.ChipCount}, gain {synth.MasterGain:0.00}).");
             SDL.SDL_PauseAudioDevice(device, 0);
 
             while (SDL.SDL_GetAudioDeviceStatus(device) == SDL.SDL_AudioStatus.SDL_AUDIO_PLAYING)
@@ -97,12 +117,16 @@ public static class Program
         return 0;
     }
 
-    private static bool TryResolveOptions(string[] args, out string midiPath, out int chipCount, out int exitCode)
+    private static bool TryResolveOptions(string[] args, out string midiPath, out int chipCount, out string bankPath, out float gain, out int exitCode)
     {
         midiPath = string.Empty;
         chipCount = DefaultChipCount;
+        bankPath = string.Empty;
+        gain = 1f;
         exitCode = 0;
         bool chipCountSet = false;
+        bool bankPathSet = false;
+        bool gainSet = false;
 
         if (args.Length == 0)
         {
@@ -173,6 +197,61 @@ public static class Program
                 continue;
             }
 
+            if (arg is "--bank" or "--wopl" or "--bank-file")
+            {
+                if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith('-'))
+                {
+                    Console.WriteLine($"Missing bank path after {arg}.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                if (bankPathSet)
+                {
+                    Console.WriteLine("Multiple bank paths provided.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                bankPath = args[++i];
+                bankPathSet = true;
+                continue;
+            }
+
+            if (arg is "--gain" or "--volume" or "--master-gain")
+            {
+                if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith('-'))
+                {
+                    Console.WriteLine($"Missing gain value after {arg}.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                if (gainSet)
+                {
+                    Console.WriteLine("Multiple gain values provided.");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                if (!float.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed) || parsed <= 0f)
+                {
+                    Console.WriteLine($"Invalid gain value: {args[i + 1]}");
+                    PrintUsage();
+                    exitCode = 1;
+                    return false;
+                }
+
+                gain = parsed;
+                gainSet = true;
+                i++;
+                continue;
+            }
+
             if (!arg.StartsWith('-'))
             {
                 if (!string.IsNullOrWhiteSpace(midiPath))
@@ -198,6 +277,11 @@ public static class Program
             midiPath = DefaultMidiPath();
         }
 
+        if (!gainSet)
+        {
+            gain = 1f / Math.Max(1, chipCount);
+        }
+
         return true;
     }
 
@@ -215,6 +299,8 @@ public static class Program
         Console.WriteLine("Options:");
         Console.WriteLine("  -f, --file, --midi   Path to a .mid file.");
         Console.WriteLine("  --chips <count>      Number of OPL chips to emulate (default 1).");
+        Console.WriteLine("  --bank <path>        Path to a WOPL instrument bank file.");
+        Console.WriteLine("  --gain <value>       Master output gain (default 1.0 / chip count).");
         Console.WriteLine("  -h, --help           Show this help.");
         Console.WriteLine();
         Console.WriteLine("If no path is provided, Test1.mid from the output folder is used.");
