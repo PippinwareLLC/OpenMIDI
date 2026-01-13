@@ -422,6 +422,7 @@ public static class Program
         private readonly PlaybackState _state;
         private readonly string _midiPath;
         private readonly int[] _channelCounts = new int[ChannelCount];
+        private readonly int[] _channelReleaseCounts = new int[ChannelCount];
         private readonly float[] _channelLevels = new float[ChannelCount];
         private readonly bool _interactive;
         private int _lineWidth;
@@ -454,12 +455,12 @@ public static class Program
                 return;
             }
 
-            _state.Synth.CopyChannelMeters(_channelCounts, _channelLevels);
+            _state.Synth.CopyChannelMeters(_channelCounts, _channelReleaseCounts, _channelLevels);
 
             StringBuilder builder = new StringBuilder();
             builder.AppendLine(PadLine($"OpenMIDI OPL Status - {Path.GetFileName(_midiPath)}", _lineWidth));
             builder.AppendLine(PadLine(
-                $"Time {_state.Player.CurrentTimeSeconds:0.00}/{_state.Player.DurationSeconds:0.00}s  Voices {_state.Synth.ActiveVoiceCount}/{_state.Synth.VoiceCount}  Chips {_state.Synth.ChipCount}",
+                $"Time {_state.Player.CurrentTimeSeconds:0.00}/{_state.Player.DurationSeconds:0.00}s  Voices {_state.Synth.ActiveVoiceCount}/{_state.Synth.VoiceCount}  Rel {_state.Synth.ReleaseVoiceCount}  Chips {_state.Synth.ChipCount}",
                 _lineWidth));
             builder.AppendLine(PadLine(
                 $"VU L {FormatBar(_state.Synth.LastPeakLeft, VuBarWidth)} {_state.Synth.LastPeakLeft:0.00}  R {FormatBar(_state.Synth.LastPeakRight, VuBarWidth)} {_state.Synth.LastPeakRight:0.00}",
@@ -471,7 +472,7 @@ public static class Program
             for (int i = 0; i < ChannelCount; i++)
             {
                 string roll = BuildPianoRollLine(i);
-                string line = $" CH{i + 1:00} {FormatBar(_channelLevels[i], ChannelBarWidth)} {_channelCounts[i],2} voice(s) {roll}";
+                string line = $" CH{i + 1:00} {FormatBar(_channelLevels[i], ChannelBarWidth)} {_channelCounts[i],2} voice(s) rel {_channelReleaseCounts[i],2} {roll}";
                 builder.AppendLine(PadLine(line, _lineWidth));
             }
 
@@ -521,7 +522,7 @@ public static class Program
 
         private int CalculateRollNoteCount()
         {
-            int available = _lineWidth - (ChannelBarWidth + 20);
+            int available = _lineWidth - (ChannelBarWidth + 28);
             return Math.Clamp(available, MinRollNoteCount, MaxRollNoteCount);
         }
 

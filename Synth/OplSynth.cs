@@ -71,8 +71,10 @@ public sealed class OplSynth : IMidiSynth
     private readonly OplSynthMode _mode;
     private int _ageCounter;
     private readonly int[] _channelActiveCounts;
+    private readonly int[] _channelReleaseCounts;
     private readonly float[] _channelLevels;
     private int _activeVoiceCount;
+    private int _releaseVoiceCount;
     private int _peakActiveVoiceCount;
     private float _lastPeakLeft;
     private float _lastPeakRight;
@@ -124,6 +126,7 @@ public sealed class OplSynth : IMidiSynth
         }
 
         _channelActiveCounts = new int[16];
+        _channelReleaseCounts = new int[16];
         _channelLevels = new float[16];
         _deepTremolo = _bankSet.DeepTremolo;
         _deepVibrato = _bankSet.DeepVibrato;
@@ -137,6 +140,7 @@ public sealed class OplSynth : IMidiSynth
     public int ChipCount => _cores.Length;
     public int VoiceCount => _voices.Length;
     public int ActiveVoiceCount => _activeVoiceCount;
+    public int ReleaseVoiceCount => _releaseVoiceCount;
     public int PeakActiveVoiceCount => _peakActiveVoiceCount;
     public float LastPeakLeft => _lastPeakLeft;
     public float LastPeakRight => _lastPeakRight;
@@ -181,6 +185,7 @@ public sealed class OplSynth : IMidiSynth
 
         _ageCounter = 0;
         _activeVoiceCount = 0;
+        _releaseVoiceCount = 0;
         _peakActiveVoiceCount = 0;
         _lastPeakLeft = 0f;
         _lastPeakRight = 0f;
@@ -189,6 +194,7 @@ public sealed class OplSynth : IMidiSynth
         _releaseReuseCount = 0;
         _voiceStealCount = 0;
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
+        Array.Clear(_channelReleaseCounts, 0, _channelReleaseCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
         Array.Clear(_rhythmCounts, 0, _rhythmCounts.Length);
         Array.Clear(_rhythmNoteCounts, 0, _rhythmNoteCounts.Length);
@@ -452,8 +458,19 @@ public sealed class OplSynth : IMidiSynth
 
     public void CopyChannelMeters(Span<int> counts, Span<float> levels)
     {
+        CopyChannelMeters(counts, Span<int>.Empty, levels);
+    }
+
+    public void CopyChannelMeters(Span<int> counts, Span<int> releaseCounts, Span<float> levels)
+    {
         int countLength = Math.Min(counts.Length, _channelActiveCounts.Length);
         _channelActiveCounts.AsSpan(0, countLength).CopyTo(counts);
+
+        if (!releaseCounts.IsEmpty)
+        {
+            int releaseLength = Math.Min(releaseCounts.Length, _channelReleaseCounts.Length);
+            _channelReleaseCounts.AsSpan(0, releaseLength).CopyTo(releaseCounts);
+        }
 
         int levelLength = Math.Min(levels.Length, _channelLevels.Length);
         _channelLevels.AsSpan(0, levelLength).CopyTo(levels);
@@ -661,8 +678,10 @@ public sealed class OplSynth : IMidiSynth
     private void UpdateChannelMeters()
     {
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
+        Array.Clear(_channelReleaseCounts, 0, _channelReleaseCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
         _activeVoiceCount = 0;
+        _releaseVoiceCount = 0;
 
         foreach (OplVoice voice in _voices)
         {
@@ -671,23 +690,39 @@ public sealed class OplSynth : IMidiSynth
                 continue;
             }
 
-            _activeVoiceCount++;
-            if (voice.MidiChannel >= 0 && voice.MidiChannel < _channelActiveCounts.Length)
+            if (!TryGetVoiceEnvelopeInfo(voice, out float level, out OplEnvelopeStage stage))
             {
-                if (!TryGetVoiceEnvelopeInfo(voice, out float level, out OplEnvelopeStage stage))
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                if (stage == OplEnvelopeStage.Off)
-                {
-                    voice.Active = false;
-                    voice.KeyOn = false;
-                    voice.Sustained = false;
-                    continue;
-                }
+            if (stage == OplEnvelopeStage.Off)
+            {
+                voice.Active = false;
+                voice.KeyOn = false;
+                voice.Sustained = false;
+                continue;
+            }
 
-                _channelActiveCounts[voice.MidiChannel]++;
+            bool channelValid = voice.MidiChannel >= 0 && voice.MidiChannel < _channelActiveCounts.Length;
+            if (voice.KeyOn)
+            {
+                _activeVoiceCount++;
+                if (channelValid)
+                {
+                    _channelActiveCounts[voice.MidiChannel]++;
+                }
+            }
+            else
+            {
+                _releaseVoiceCount++;
+                if (channelValid)
+                {
+                    _channelReleaseCounts[voice.MidiChannel]++;
+                }
+            }
+
+            if (channelValid)
+            {
                 _channelLevels[voice.MidiChannel] += level;
             }
         }

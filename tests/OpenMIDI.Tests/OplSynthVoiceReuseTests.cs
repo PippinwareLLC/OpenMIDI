@@ -31,7 +31,7 @@ public sealed class OplSynthVoiceReuseTests
 
         Assert.Equal(2, synth.NoteOnCount);
         Assert.Equal(0, synth.SameNoteReuseCount);
-        Assert.Equal(2, synth.ActiveVoiceCount);
+        Assert.Equal(1, synth.ActiveVoiceCount);
     }
 
     private static void RenderOnce(OplSynth synth)
