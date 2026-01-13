@@ -15,6 +15,15 @@ public sealed class OplSynth : IMidiSynth
         Steal
     }
 
+    private enum RhythmInstrument
+    {
+        BassDrum,
+        Snare,
+        Tom,
+        Cymbal,
+        HiHat
+    }
+
     private sealed class OplVoice
     {
         public bool Active;
@@ -23,6 +32,7 @@ public sealed class OplSynth : IMidiSynth
         public int MidiChannel;
         public int Note;
         public int Velocity;
+        public int Program;
         public int OplChannel;
         public int Age;
     }
@@ -38,6 +48,16 @@ public sealed class OplSynth : IMidiSynth
     }
 
     private const int MaxChipCount = 8;
+    private const int PercussionChannel = 9;
+    private const int RhythmChannelStart = 6;
+    private const int RhythmChannelEnd = 8;
+    private const int RhythmInstrumentCount = 5;
+    private const int RhythmOpBdMod = 12;
+    private const int RhythmOpBdCar = 15;
+    private const int RhythmOpHh = 13;
+    private const int RhythmOpSd = 16;
+    private const int RhythmOpTom = 14;
+    private const int RhythmOpTc = 17;
     private readonly OplCore[] _cores;
     private readonly int _channelsPerChip;
     private readonly OplVoice[] _voices;
@@ -55,6 +75,7 @@ public sealed class OplSynth : IMidiSynth
     private int _releaseReuseCount;
     private int _voiceStealCount;
     private float[] _mixBuffer = Array.Empty<float>();
+    private readonly int[] _rhythmCounts = new int[RhythmInstrumentCount];
 
     private const byte DefaultFeedback = 2;
     private const byte ModAmVibEgtKsrMult = 0x21;
@@ -67,7 +88,11 @@ public sealed class OplSynth : IMidiSynth
     private const byte CarArDr = 0xF3;
     private const byte CarSlRr = 0xF5;
     private const byte CarWaveform = 0x00;
-    private const float ReleaseReuseThreshold = 0.02f;
+    private static readonly int[] ChannelPriority =
+    {
+        1, 1, 2, 3, 3, 3, 3, 3,
+        3, 0, 3, 3, 3, 3, 3, 3
+    };
 
     private static readonly int[] OperatorIndexToOffset =
     {
@@ -131,6 +156,7 @@ public sealed class OplSynth : IMidiSynth
             voice.MidiChannel = 0;
             voice.Note = 0;
             voice.Velocity = 0;
+            voice.Program = 0;
             voice.OplChannel = 0;
             voice.Age = 0;
         }
@@ -156,6 +182,7 @@ public sealed class OplSynth : IMidiSynth
         _voiceStealCount = 0;
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
         Array.Clear(_channelLevels, 0, _channelLevels.Length);
+        Array.Clear(_rhythmCounts, 0, _rhythmCounts.Length);
         foreach (OplCore core in _cores)
         {
             core.Reset();
@@ -179,13 +206,21 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        if (IsPercussionChannel(channel))
+        {
+            _noteOnCount++;
+            HandlePercussionNoteOn(note, velocity);
+            return;
+        }
+
         MidiChannelState channelState = _channels[channel];
         _noteOnCount++;
 
-        int reuseIndex = FindSameNoteVoiceIndex(channel, note);
+        int reuseIndex = FindSameNoteVoiceIndex(channel, note, channelState.Program);
         if (reuseIndex >= 0)
         {
             _sameNoteReuseCount++;
+            KeyOffDuplicateVoices(channel, note, reuseIndex);
             OplVoice reuseVoice = _voices[reuseIndex];
             KeyOffVoice(reuseVoice);
             reuseVoice.Active = true;
@@ -194,13 +229,15 @@ public sealed class OplSynth : IMidiSynth
             reuseVoice.MidiChannel = channel;
             reuseVoice.Note = note;
             reuseVoice.Velocity = velocity;
+            reuseVoice.Program = channelState.Program;
             reuseVoice.OplChannel = reuseIndex;
             reuseVoice.Age = _ageCounter++;
             ApplyChannelRegisters(reuseVoice, channelState);
             return;
         }
 
-        int voiceIndex = AllocateVoiceIndex(out VoiceAllocationKind allocationKind);
+        KeyOffDuplicateVoices(channel, note, -1);
+        int voiceIndex = AllocateVoiceIndex(channel, channelState.Program, out VoiceAllocationKind allocationKind);
         if (allocationKind == VoiceAllocationKind.ReleaseReuse)
         {
             _releaseReuseCount++;
@@ -217,6 +254,7 @@ public sealed class OplSynth : IMidiSynth
         voice.MidiChannel = channel;
         voice.Note = note;
         voice.Velocity = velocity;
+        voice.Program = channelState.Program;
         voice.OplChannel = voiceIndex;
         voice.Age = _ageCounter++;
 
@@ -227,6 +265,12 @@ public sealed class OplSynth : IMidiSynth
     {
         if (!IsValidChannel(channel))
         {
+            return;
+        }
+
+        if (IsPercussionChannel(channel))
+        {
+            HandlePercussionNoteOff(note);
             return;
         }
 
@@ -269,7 +313,10 @@ public sealed class OplSynth : IMidiSynth
                 UpdateChannelGains(channel, channelState);
                 break;
             case 64:
-                UpdateSustainPedal(channel, channelState, value >= 64);
+                if (!IsPercussionChannel(channel))
+                {
+                    UpdateSustainPedal(channel, channelState, value >= 64);
+                }
                 break;
             case 120:
             case 123:
@@ -366,28 +413,39 @@ public sealed class OplSynth : IMidiSynth
         _channelLevels.AsSpan(0, levelLength).CopyTo(levels);
     }
 
-    private int AllocateVoiceIndex(out VoiceAllocationKind allocationKind)
+    private int AllocateVoiceIndex(int midiChannel, int program, out VoiceAllocationKind allocationKind)
     {
         for (int i = 0; i < _voices.Length; i++)
         {
-            if (!_voices[i].Active)
+            if (IsChannelUnavailableForAllocation(i))
+            {
+                continue;
+            }
+
+            OplVoice voice = _voices[i];
+            if (!voice.Active)
             {
                 allocationKind = VoiceAllocationKind.Free;
                 return i;
             }
+
+            if (TryGetVoiceEnvelopeInfo(voice, out _, out OplEnvelopeStage stage) && stage == OplEnvelopeStage.Off)
+            {
+                voice.Active = false;
+                voice.KeyOn = false;
+                voice.Sustained = false;
+                allocationKind = VoiceAllocationKind.ReleaseReuse;
+                return i;
+            }
         }
 
-        int reuseIndex = FindReusableVoiceIndex();
-        if (reuseIndex >= 0)
+        int stealIndex = SelectVoiceToSteal(midiChannel, program);
+        if (stealIndex < 0)
         {
-            _voices[reuseIndex].Active = false;
-            _voices[reuseIndex].KeyOn = false;
-            _voices[reuseIndex].Sustained = false;
-            allocationKind = VoiceAllocationKind.ReleaseReuse;
-            return reuseIndex;
+            allocationKind = VoiceAllocationKind.Free;
+            return 0;
         }
 
-        int stealIndex = SelectVoiceToSteal();
         KeyOffVoice(_voices[stealIndex]);
         _voices[stealIndex].Active = false;
         _voices[stealIndex].KeyOn = false;
@@ -396,13 +454,18 @@ public sealed class OplSynth : IMidiSynth
         return stealIndex;
     }
 
-    private int FindSameNoteVoiceIndex(int channel, int note)
+    private int FindSameNoteVoiceIndex(int channel, int note, int program)
     {
         int candidate = -1;
         for (int i = 0; i < _voices.Length; i++)
         {
             OplVoice voice = _voices[i];
-            if (!voice.Active || voice.MidiChannel != channel || voice.Note != note)
+            if (!voice.Active || voice.MidiChannel != channel || voice.Note != note || voice.Program != program)
+            {
+                continue;
+            }
+
+            if (IsChannelUnavailableForAllocation(voice.OplChannel))
             {
                 continue;
             }
@@ -421,75 +484,53 @@ public sealed class OplSynth : IMidiSynth
         return candidate;
     }
 
-    private int FindReusableVoiceIndex()
+    private void KeyOffDuplicateVoices(int channel, int note, int excludeIndex)
     {
         for (int i = 0; i < _voices.Length; i++)
         {
-            OplVoice voice = _voices[i];
-            if (!voice.Active || voice.KeyOn || voice.Sustained)
+            if (i == excludeIndex)
             {
                 continue;
             }
 
-            if (TryGetVoiceEnvelopeLevel(voice, out float level, out bool isOff) && (isOff || level <= ReleaseReuseThreshold))
+            OplVoice voice = _voices[i];
+            if (!voice.Active || voice.MidiChannel != channel || voice.Note != note)
             {
-                return i;
+                continue;
             }
-        }
 
-        return -1;
+            KeyOffVoice(voice);
+        }
     }
 
-    private int SelectVoiceToSteal()
+    private int SelectVoiceToSteal(int midiChannel, int program)
     {
-        int bestIndex = 0;
-        float bestLevel = float.MaxValue;
-        bool bestIsRelease = false;
-        bool bestIsSustained = true;
+        int bestIndex = -1;
+        int bestCategory = int.MinValue;
+        int bestPriority = int.MinValue;
+        bool bestSameProgram = false;
+        int bestAge = int.MaxValue;
 
         for (int i = 0; i < _voices.Length; i++)
         {
             OplVoice voice = _voices[i];
-            if (!voice.Active)
-            {
-                return i;
-            }
-
-            if (!TryGetVoiceEnvelopeLevel(voice, out float level, out bool isOff))
+            if (!voice.Active || IsChannelUnavailableForAllocation(i))
             {
                 continue;
             }
 
-            bool isRelease = !voice.KeyOn || isOff;
-            bool isSustained = voice.Sustained;
-            if (isSustained != bestIsSustained)
-            {
-                if (!isSustained)
-                {
-                    bestIsSustained = false;
-                    bestIsRelease = isRelease;
-                    bestLevel = level;
-                    bestIndex = i;
-                }
+            int category = GetVoiceStealCategory(voice);
+            int priority = GetChannelPriority(voice.MidiChannel);
+            bool sameProgram = voice.Program == program;
+            int age = voice.Age;
 
-                continue;
-            }
-
-            if (isRelease && !bestIsRelease)
+            if (IsBetterStealCandidate(category, priority, sameProgram, age, i, bestCategory, bestPriority, bestSameProgram, bestAge, bestIndex))
             {
-                bestIsRelease = true;
-                bestLevel = level;
+                bestCategory = category;
+                bestPriority = priority;
+                bestSameProgram = sameProgram;
+                bestAge = age;
                 bestIndex = i;
-                continue;
-            }
-
-            if (isRelease == bestIsRelease)
-            {
-                if (level < bestLevel || (Math.Abs(level - bestLevel) < 0.0001f && voice.Age < _voices[bestIndex].Age))
-                {
-                    bestLevel = level;
-                    bestIndex = i;
-                }
             }
         }
 
@@ -498,6 +539,12 @@ public sealed class OplSynth : IMidiSynth
 
     private void AllNotesOff(int channel)
     {
+        if (IsPercussionChannel(channel))
+        {
+            ClearRhythmNotes();
+            return;
+        }
+
         foreach (OplVoice voice in _voices)
         {
             if (voice.Active && voice.MidiChannel == channel)
@@ -580,12 +627,12 @@ public sealed class OplSynth : IMidiSynth
             _activeVoiceCount++;
             if (voice.MidiChannel >= 0 && voice.MidiChannel < _channelActiveCounts.Length)
             {
-                if (!TryGetVoiceEnvelopeLevel(voice, out float level, out bool isOff))
+                if (!TryGetVoiceEnvelopeInfo(voice, out float level, out OplEnvelopeStage stage))
                 {
                     continue;
                 }
 
-                if (isOff)
+                if (stage == OplEnvelopeStage.Off)
                 {
                     voice.Active = false;
                     voice.KeyOn = false;
@@ -636,25 +683,25 @@ public sealed class OplSynth : IMidiSynth
         return true;
     }
 
-    private bool TryGetVoiceEnvelopeLevel(OplVoice voice, out float level, out bool isOff)
+    private bool TryGetVoiceEnvelopeInfo(OplVoice voice, out float level, out OplEnvelopeStage stage)
     {
         if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel channel))
         {
             level = 0f;
-            isOff = true;
+            stage = OplEnvelopeStage.Off;
             return false;
         }
 
         if (channel.CarrierIndex < 0 || channel.CarrierIndex >= core.Operators.Count)
         {
             level = 0f;
-            isOff = true;
+            stage = OplEnvelopeStage.Off;
             return false;
         }
 
         OplEnvelope envelope = core.Operators[channel.CarrierIndex].Envelope;
         level = envelope.Level;
-        isOff = envelope.Stage == OplEnvelopeStage.Off;
+        stage = envelope.Stage;
         return true;
     }
 
@@ -805,6 +852,419 @@ public sealed class OplSynth : IMidiSynth
         {
             WriteFrequency(core, localChannel, channel.FNum, channel.Block, keyOn: false);
         }
+    }
+
+    private bool IsPercussionChannel(int channel)
+    {
+        return channel == PercussionChannel;
+    }
+
+    private void HandlePercussionNoteOn(int note, int velocity)
+    {
+        if (_cores.Length == 0)
+        {
+            return;
+        }
+
+        if (velocity <= 0)
+        {
+            HandlePercussionNoteOff(note);
+            return;
+        }
+
+        OplCore core = _cores[0];
+        MidiChannelState channelState = _channels[PercussionChannel];
+        EnsureRhythmModeEnabled(core);
+        PreemptRhythmChannels();
+
+        RhythmInstrument instrument = MapPercussionInstrument(note);
+        int instrumentIndex = (int)instrument;
+        if (_rhythmCounts[instrumentIndex] < int.MaxValue)
+        {
+            _rhythmCounts[instrumentIndex]++;
+        }
+
+        ConfigureRhythmOperators(core, channelState, velocity, instrument);
+        SetRhythmChannelFrequency(core, instrument, note, channelState);
+        SetRhythmFlag(core, instrument, enable: true);
+    }
+
+    private void HandlePercussionNoteOff(int note)
+    {
+        if (_cores.Length == 0)
+        {
+            return;
+        }
+
+        OplCore core = _cores[0];
+        if (!core.Registers.RhythmEnabled)
+        {
+            return;
+        }
+
+        RhythmInstrument instrument = MapPercussionInstrument(note);
+        int instrumentIndex = (int)instrument;
+        if (_rhythmCounts[instrumentIndex] > 0)
+        {
+            _rhythmCounts[instrumentIndex]--;
+        }
+
+        if (_rhythmCounts[instrumentIndex] == 0)
+        {
+            SetRhythmFlag(core, instrument, enable: false);
+        }
+
+        if (!AnyRhythmNotesActive())
+        {
+            DisableRhythmMode(core);
+        }
+    }
+
+    private void ClearRhythmNotes()
+    {
+        if (_cores.Length == 0)
+        {
+            return;
+        }
+
+        Array.Clear(_rhythmCounts, 0, _rhythmCounts.Length);
+        DisableRhythmMode(_cores[0]);
+    }
+
+    private bool AnyRhythmNotesActive()
+    {
+        for (int i = 0; i < _rhythmCounts.Length; i++)
+        {
+            if (_rhythmCounts[i] > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void EnsureRhythmModeEnabled(OplCore core)
+    {
+        if (core.Registers.RhythmEnabled)
+        {
+            return;
+        }
+
+        WriteRhythmRegister(core, flags: 0, enabled: true);
+    }
+
+    private void DisableRhythmMode(OplCore core)
+    {
+        WriteRhythmRegister(core, flags: 0, enabled: false);
+    }
+
+    private void SetRhythmFlag(OplCore core, RhythmInstrument instrument, bool enable)
+    {
+        byte mask = GetRhythmFlagMask(instrument);
+        byte flags = core.Registers.RhythmFlags;
+
+        if (enable)
+        {
+            if ((flags & mask) != 0)
+            {
+                WriteRhythmRegister(core, (byte)(flags & ~mask), enabled: true);
+            }
+
+            flags |= mask;
+            WriteRhythmRegister(core, flags, enabled: true);
+            return;
+        }
+
+        flags = (byte)(flags & ~mask);
+        WriteRhythmRegister(core, flags, enabled: core.Registers.RhythmEnabled);
+    }
+
+    private void WriteRhythmRegister(OplCore core, byte flags, bool enabled)
+    {
+        byte value = 0;
+        if (core.Registers.TremoloDepth)
+        {
+            value |= 0x80;
+        }
+
+        if (core.Registers.VibratoDepth)
+        {
+            value |= 0x40;
+        }
+
+        if (enabled)
+        {
+            value |= 0x20;
+        }
+
+        value |= (byte)(flags & 0x1F);
+        core.WriteRegister(0xBD, value);
+    }
+
+    private void ConfigureRhythmOperators(OplCore core, MidiChannelState channelState, int velocity, RhythmInstrument instrument)
+    {
+        byte carrierTl = ComputeCarrierTotalLevel(channelState, velocity);
+
+        switch (instrument)
+        {
+            case RhythmInstrument.BassDrum:
+                WriteOperatorRegister(core, RhythmOpBdMod, 0x20, ModAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpBdMod, 0x40, ModKslTl);
+                WriteOperatorRegister(core, RhythmOpBdMod, 0x60, ModArDr);
+                WriteOperatorRegister(core, RhythmOpBdMod, 0x80, ModSlRr);
+                WriteOperatorRegister(core, RhythmOpBdMod, 0xE0, ModWaveform);
+
+                WriteOperatorRegister(core, RhythmOpBdCar, 0x20, CarAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpBdCar, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpBdCar, 0x60, CarArDr);
+                WriteOperatorRegister(core, RhythmOpBdCar, 0x80, CarSlRr);
+                WriteOperatorRegister(core, RhythmOpBdCar, 0xE0, CarWaveform);
+                break;
+            case RhythmInstrument.Snare:
+                WriteOperatorRegister(core, RhythmOpSd, 0x20, CarAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpSd, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpSd, 0x60, CarArDr);
+                WriteOperatorRegister(core, RhythmOpSd, 0x80, CarSlRr);
+                WriteOperatorRegister(core, RhythmOpSd, 0xE0, CarWaveform);
+                break;
+            case RhythmInstrument.Tom:
+                WriteOperatorRegister(core, RhythmOpTom, 0x20, CarAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpTom, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpTom, 0x60, CarArDr);
+                WriteOperatorRegister(core, RhythmOpTom, 0x80, CarSlRr);
+                WriteOperatorRegister(core, RhythmOpTom, 0xE0, CarWaveform);
+                break;
+            case RhythmInstrument.Cymbal:
+                WriteOperatorRegister(core, RhythmOpTc, 0x20, CarAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpTc, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpTc, 0x60, CarArDr);
+                WriteOperatorRegister(core, RhythmOpTc, 0x80, CarSlRr);
+                WriteOperatorRegister(core, RhythmOpTc, 0xE0, CarWaveform);
+                break;
+            case RhythmInstrument.HiHat:
+                WriteOperatorRegister(core, RhythmOpHh, 0x20, CarAmVibEgtKsrMult);
+                WriteOperatorRegister(core, RhythmOpHh, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpHh, 0x60, CarArDr);
+                WriteOperatorRegister(core, RhythmOpHh, 0x80, CarSlRr);
+                WriteOperatorRegister(core, RhythmOpHh, 0xE0, CarWaveform);
+                break;
+        }
+
+        WriteRhythmChannelFeedback(core, channelState);
+    }
+
+    private void WriteRhythmChannelFeedback(OplCore core, MidiChannelState channelState)
+    {
+        WriteChannelFeedback(core, RhythmChannelStart, channelState);
+        WriteChannelFeedback(core, RhythmChannelStart + 1, channelState);
+        WriteChannelFeedback(core, RhythmChannelEnd, channelState);
+    }
+
+    private void SetRhythmChannelFrequency(OplCore core, RhythmInstrument instrument, int note, MidiChannelState channelState)
+    {
+        int channelIndex = instrument switch
+        {
+            RhythmInstrument.BassDrum => 6,
+            RhythmInstrument.Snare => 7,
+            RhythmInstrument.HiHat => 7,
+            RhythmInstrument.Tom => 8,
+            RhythmInstrument.Cymbal => 8,
+            _ => 6
+        };
+
+        double frequency = GetFrequency(channelState, note);
+        ComputeBlockAndFnum(frequency, out int block, out int fnum);
+        WriteFrequency(core, channelIndex, fnum, block, keyOn: false);
+    }
+
+    private void PreemptRhythmChannels()
+    {
+        for (int i = 0; i < _voices.Length; i++)
+        {
+            OplVoice voice = _voices[i];
+            if (!voice.Active || !IsChannelReservedForRhythm(voice.OplChannel))
+            {
+                continue;
+            }
+
+            KeyOffVoice(voice);
+            voice.Active = false;
+            voice.KeyOn = false;
+            voice.Sustained = false;
+        }
+    }
+
+    private static RhythmInstrument MapPercussionInstrument(int note)
+    {
+        switch (note)
+        {
+            case 35:
+            case 36:
+                return RhythmInstrument.BassDrum;
+            case 38:
+            case 40:
+                return RhythmInstrument.Snare;
+            case 41:
+            case 43:
+            case 45:
+            case 47:
+            case 48:
+            case 50:
+                return RhythmInstrument.Tom;
+            case 49:
+            case 51:
+            case 57:
+            case 59:
+                return RhythmInstrument.Cymbal;
+            case 42:
+            case 44:
+            case 46:
+                return RhythmInstrument.HiHat;
+            default:
+                if (note < 40)
+                {
+                    return RhythmInstrument.BassDrum;
+                }
+
+                if (note < 48)
+                {
+                    return RhythmInstrument.Snare;
+                }
+
+                if (note < 55)
+                {
+                    return RhythmInstrument.Tom;
+                }
+
+                if (note < 60)
+                {
+                    return RhythmInstrument.Cymbal;
+                }
+
+                return RhythmInstrument.HiHat;
+        }
+    }
+
+    private static byte GetRhythmFlagMask(RhythmInstrument instrument)
+    {
+        return instrument switch
+        {
+            RhythmInstrument.BassDrum => 0x10,
+            RhythmInstrument.Snare => 0x08,
+            RhythmInstrument.Tom => 0x04,
+            RhythmInstrument.Cymbal => 0x02,
+            RhythmInstrument.HiHat => 0x01,
+            _ => 0x00
+        };
+    }
+
+    private int GetChannelPriority(int channel)
+    {
+        if (channel < 0 || channel >= ChannelPriority.Length)
+        {
+            return 3;
+        }
+
+        return ChannelPriority[channel];
+    }
+
+    private int GetVoiceStealCategory(OplVoice voice)
+    {
+        if (!voice.KeyOn)
+        {
+            return 2;
+        }
+
+        return voice.Sustained ? 1 : 0;
+    }
+
+    private bool IsBetterStealCandidate(int category, int priority, bool sameProgram, int age, int index,
+        int bestCategory, int bestPriority, bool bestSameProgram, int bestAge, int bestIndex)
+    {
+        if (bestIndex < 0)
+        {
+            return true;
+        }
+
+        if (category != bestCategory)
+        {
+            return category > bestCategory;
+        }
+
+        if (priority != bestPriority)
+        {
+            return priority > bestPriority;
+        }
+
+        if (sameProgram != bestSameProgram)
+        {
+            return sameProgram;
+        }
+
+        if (age != bestAge)
+        {
+            return age < bestAge;
+        }
+
+        return index < bestIndex;
+    }
+
+    private bool IsChannelUnavailableForAllocation(int oplChannel)
+    {
+        return IsChannelReservedForRhythm(oplChannel) || IsFourOperatorSecondaryChannel(oplChannel);
+    }
+
+    private bool IsChannelReservedForRhythm(int oplChannel)
+    {
+        if (_cores.Length == 0)
+        {
+            return false;
+        }
+
+        int chipIndex = oplChannel / _channelsPerChip;
+        if (chipIndex != 0)
+        {
+            return false;
+        }
+
+        if (!_cores[0].Registers.RhythmEnabled)
+        {
+            return false;
+        }
+
+        int localChannel = oplChannel - chipIndex * _channelsPerChip;
+        return localChannel >= RhythmChannelStart && localChannel <= RhythmChannelEnd;
+    }
+
+    private bool IsFourOperatorSecondaryChannel(int oplChannel)
+    {
+        if (_mode != OplSynthMode.Opl3)
+        {
+            return false;
+        }
+
+        if (!TryGetCore(oplChannel, out OplCore core, out int localChannel))
+        {
+            return false;
+        }
+
+        byte mask = core.Registers.FourOperatorEnableMask;
+        return IsFourOperatorSecondaryChannel(localChannel, mask);
+    }
+
+    private static bool IsFourOperatorSecondaryChannel(int localChannel, byte mask)
+    {
+        return localChannel switch
+        {
+            3 => (mask & 0x01) != 0,
+            4 => (mask & 0x02) != 0,
+            5 => (mask & 0x04) != 0,
+            12 => (mask & 0x08) != 0,
+            13 => (mask & 0x10) != 0,
+            14 => (mask & 0x20) != 0,
+            _ => false
+        };
     }
 
     private double GetFrequency(MidiChannelState channelState, int note)

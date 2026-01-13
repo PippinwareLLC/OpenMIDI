@@ -18,6 +18,22 @@ public sealed class OplSynthVoiceReuseTests
         Assert.Equal(1, synth.ActiveVoiceCount);
     }
 
+    [Fact]
+    public void NoteOn_DoesNotReuseVoiceWhenProgramChanges()
+    {
+        OplSynth synth = new OplSynth(OplSynthMode.Opl2);
+
+        synth.ProgramChange(0, 1);
+        synth.NoteOn(0, 60, 100);
+        synth.ProgramChange(0, 2);
+        synth.NoteOn(0, 60, 110);
+        RenderOnce(synth);
+
+        Assert.Equal(2, synth.NoteOnCount);
+        Assert.Equal(0, synth.SameNoteReuseCount);
+        Assert.Equal(2, synth.ActiveVoiceCount);
+    }
+
     private static void RenderOnce(OplSynth synth)
     {
         float[] buffer = new float[2];

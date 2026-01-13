@@ -18,6 +18,8 @@ OPL core render path with a default 2-op patch while instrument mapping is expan
 - Tremolo and vibrato LFOs are implemented with depth control.
 - OPL rhythm mode and percussion channels (BD/SD/TT/CY/HH) are implemented.
 - Sustain pedal (CC64) is mapped to hold/release OPL voices.
+- OplSynth voice allocation prioritizes released notes, uses channel priority and instrument-aware scoring, and treats sustained notes as lower-priority steal candidates.
+- MIDI channel 10 percussion is mapped to OPL rhythm flags with reserved rhythm channels.
 - Reference render clip tests cover the OPL core output.
 
 ## Quickstart
@@ -60,7 +62,7 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | 4-operator channel pairing | [ ] | [ ] | [ ] |
 | Stereo output routing | [ ] | [ ] | [x] |
 | MIDI instrument bank mapping | [ ] | [ ] | [ ] |
-| MIDI percussion mapping | [ ] | [ ] | [ ] |
+| MIDI percussion mapping | [ ] | [x] | [x] |
 | Pitch bend and controller mapping (volume/expression/pan/sustain) | [x] | [x] | [x] |
 | Mod wheel/vibrato controller mapping | [ ] | [ ] | [ ] |
 | Envelope rate table validation (ymfm) | [x] | [x] | [x] |

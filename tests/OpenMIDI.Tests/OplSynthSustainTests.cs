@@ -22,31 +22,35 @@ public sealed class OplSynthSustainTests
     }
 
     [Fact]
-    public void SustainPedal_ProtectsSustainedVoiceFromSteal()
+    public void SustainPedal_SustainedVoiceIsStealCandidate()
     {
         OplSynth synth = new OplSynth(OplSynthMode.Opl2);
 
-        for (int i = 0; i < 9; i++)
-        {
-            synth.NoteOn(0, 60 + i, 100);
-        }
-
         synth.ControlChange(0, 64, 127);
+        synth.NoteOn(0, 60, 100);
         synth.NoteOff(0, 60, 0);
 
-        int a0Before = synth.Core.ReadRegister(0xA0);
-        int b0Before = synth.Core.ReadRegister(0xB0);
-        int fnumBefore = a0Before | ((b0Before & 0x03) << 8);
-        int blockBefore = (b0Before >> 2) & 0x07;
+        for (int i = 0; i < 8; i++)
+        {
+            synth.NoteOn(1, 70 + i, 100);
+        }
 
-        synth.NoteOn(1, 84, 100);
+        RenderOnce(synth);
 
-        int a0After = synth.Core.ReadRegister(0xA0);
-        int b0After = synth.Core.ReadRegister(0xB0);
-        int fnumAfter = a0After | ((b0After & 0x03) << 8);
-        int blockAfter = (b0After >> 2) & 0x07;
+        int[] counts = new int[16];
+        float[] levels = new float[16];
+        synth.CopyChannelMeters(counts, levels);
+        Assert.Equal(1, counts[0]);
 
-        Assert.Equal(fnumBefore, fnumAfter);
-        Assert.Equal(blockBefore, blockAfter);
+        synth.NoteOn(1, 80, 100);
+        RenderOnce(synth);
+        synth.CopyChannelMeters(counts, levels);
+        Assert.Equal(0, counts[0]);
+    }
+
+    private static void RenderOnce(OplSynth synth)
+    {
+        float[] buffer = new float[2];
+        synth.Render(buffer, 0, 1, 44100);
     }
 }
