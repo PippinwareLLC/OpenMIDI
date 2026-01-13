@@ -15,6 +15,13 @@ public sealed class OplSynth : IMidiSynth
         Steal
     }
 
+    private enum ChannelAllocMode
+    {
+        OffDelay,
+        SameInstrument,
+        AnyReleased
+    }
+
     private enum RhythmInstrument
     {
         BassDrum,
@@ -39,6 +46,9 @@ public sealed class OplSynth : IMidiSynth
         public OplInstrument Instrument = OplInstrumentDefaults.DefaultInstrument;
         public int OplChannel;
         public int Age;
+        public long KeyOnRemainingUs;
+        public long KeyOffRemainingUs;
+        public long VibDelayUs;
     }
 
     private sealed class MidiChannelState
@@ -64,6 +74,10 @@ public sealed class OplSynth : IMidiSynth
     private const int RhythmOpSd = 16;
     private const int RhythmOpTom = 14;
     private const int RhythmOpTc = 17;
+    private const byte VolumeModelHmi = 10;
+    private const byte VolumeModelHmiOld = 11;
+    private const byte VolumeModelMsAdlib = 12;
+    private const byte VolumeModelImfCreator = 13;
     private readonly OplCore[] _cores;
     private readonly int _channelsPerChip;
     private readonly OplVoice[] _voices;
@@ -89,12 +103,6 @@ public sealed class OplSynth : IMidiSynth
     private OplInstrumentBankSet _bankSet = OplInstrumentBankSet.CreateDefault();
     private bool _deepTremolo;
     private bool _deepVibrato;
-    private static readonly int[] ChannelPriority =
-    {
-        1, 1, 2, 3, 3, 3, 3, 3,
-        3, 0, 3, 3, 3, 3, 3, 3
-    };
-
     private static readonly int[] OperatorIndexToOffset =
     {
         0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21
@@ -169,6 +177,9 @@ public sealed class OplSynth : IMidiSynth
             voice.Instrument = _bankSet.DefaultInstrument;
             voice.OplChannel = 0;
             voice.Age = 0;
+            voice.KeyOnRemainingUs = 0;
+            voice.KeyOffRemainingUs = 0;
+            voice.VibDelayUs = 0;
         }
 
         foreach (MidiChannelState channel in _channels)
@@ -219,6 +230,43 @@ public sealed class OplSynth : IMidiSynth
         ApplyLfoDepths();
     }
 
+    private void ConfigureVoiceForNote(OplVoice voice, int voiceIndex, int channel, int note, int oplNote,
+        int velocity, MidiChannelState channelState, OplInstrument instrument)
+    {
+        voice.Active = true;
+        voice.KeyOn = true;
+        voice.Sustained = false;
+        voice.MidiChannel = channel;
+        voice.Note = note;
+        voice.OplNote = oplNote;
+        voice.Velocity = velocity;
+        voice.Program = channelState.Program;
+        voice.BankMsb = channelState.BankMsb;
+        voice.BankLsb = channelState.BankLsb;
+        voice.Instrument = instrument;
+        voice.OplChannel = voiceIndex;
+        voice.Age = _ageCounter++;
+        InitializeVoiceTimers(voice, instrument);
+    }
+
+    private static long GetInstrumentDelayUs(ushort delayMs)
+    {
+        if (delayMs <= 0)
+        {
+            return 0;
+        }
+
+        return delayMs * 1000L;
+    }
+
+    private void InitializeVoiceTimers(OplVoice voice, OplInstrument instrument)
+    {
+        OplInstrument source = instrument ?? _bankSet.DefaultInstrument;
+        voice.KeyOnRemainingUs = GetInstrumentDelayUs(source.DelayOnMs);
+        voice.KeyOffRemainingUs = 0;
+        voice.VibDelayUs = 0;
+    }
+
     public void NoteOn(int channel, int note, int velocity)
     {
         if (!IsValidChannel(channel))
@@ -260,19 +308,8 @@ public sealed class OplSynth : IMidiSynth
             KeyOffDuplicateVoices(channel, note, reuseIndex);
             OplVoice reuseVoice = _voices[reuseIndex];
             KeyOffVoice(reuseVoice);
-            reuseVoice.Active = true;
-            reuseVoice.KeyOn = true;
-            reuseVoice.Sustained = false;
-            reuseVoice.MidiChannel = channel;
-            reuseVoice.Note = note;
-            reuseVoice.OplNote = melodicNote;
-            reuseVoice.Velocity = melodicVelocity;
-            reuseVoice.Program = channelState.Program;
-            reuseVoice.BankMsb = channelState.BankMsb;
-            reuseVoice.BankLsb = channelState.BankLsb;
-            reuseVoice.Instrument = melodicInstrument;
-            reuseVoice.OplChannel = reuseIndex;
-            reuseVoice.Age = _ageCounter++;
+            ConfigureVoiceForNote(reuseVoice, reuseIndex, channel, note, melodicNote, melodicVelocity, channelState,
+                melodicInstrument);
             ApplyChannelRegisters(reuseVoice, channelState);
             return;
         }
@@ -290,20 +327,8 @@ public sealed class OplSynth : IMidiSynth
         }
 
         OplVoice voice = _voices[voiceIndex];
-        voice.Active = true;
-        voice.KeyOn = true;
-        voice.Sustained = false;
-        voice.MidiChannel = channel;
-        voice.Note = note;
-        voice.OplNote = melodicNote;
-        voice.Velocity = melodicVelocity;
-        voice.Program = channelState.Program;
-        voice.BankMsb = channelState.BankMsb;
-        voice.BankLsb = channelState.BankLsb;
-        voice.Instrument = melodicInstrument;
-        voice.OplChannel = voiceIndex;
-        voice.Age = _ageCounter++;
-
+        ConfigureVoiceForNote(voice, voiceIndex, channel, note, melodicNote, melodicVelocity, channelState,
+            melodicInstrument);
         ApplyChannelRegisters(voice, channelState);
     }
 
@@ -453,6 +478,7 @@ public sealed class OplSynth : IMidiSynth
 
         _lastPeakLeft = peakLeft;
         _lastPeakRight = peakRight;
+        AdvanceVoiceTiming(frames, sampleRate);
         UpdateChannelMeters();
     }
 
@@ -478,6 +504,11 @@ public sealed class OplSynth : IMidiSynth
 
     private int AllocateVoiceIndex(int midiChannel, int program, byte bankMsb, byte bankLsb, out VoiceAllocationKind allocationKind)
     {
+        _ = midiChannel;
+        ChannelAllocMode allocMode = ResolveAllocMode();
+        long bestScore = long.MinValue;
+        int bestIndex = -1;
+
         for (int i = 0; i < _voices.Length; i++)
         {
             if (IsChannelUnavailableForAllocation(i))
@@ -486,35 +517,38 @@ public sealed class OplSynth : IMidiSynth
             }
 
             OplVoice voice = _voices[i];
-            if (!voice.Active)
-            {
-                allocationKind = VoiceAllocationKind.Free;
-                return i;
-            }
+            long score = CalculateVoiceGoodness(voice, program, bankMsb, bankLsb, allocMode);
 
-            if (TryGetVoiceEnvelopeInfo(voice, out _, out OplEnvelopeStage stage) && stage == OplEnvelopeStage.Off)
+            if (score > bestScore)
             {
-                voice.Active = false;
-                voice.KeyOn = false;
-                voice.Sustained = false;
-                allocationKind = VoiceAllocationKind.ReleaseReuse;
-                return i;
+                bestScore = score;
+                bestIndex = i;
             }
         }
 
-        int stealIndex = SelectVoiceToSteal(midiChannel, program, bankMsb, bankLsb);
-        if (stealIndex < 0)
+        if (bestIndex < 0)
         {
             allocationKind = VoiceAllocationKind.Free;
             return 0;
         }
 
-        KeyOffVoice(_voices[stealIndex]);
-        _voices[stealIndex].Active = false;
-        _voices[stealIndex].KeyOn = false;
-        _voices[stealIndex].Sustained = false;
-        allocationKind = VoiceAllocationKind.Steal;
-        return stealIndex;
+        OplVoice selected = _voices[bestIndex];
+        if (!selected.Active)
+        {
+            allocationKind = VoiceAllocationKind.Free;
+            return bestIndex;
+        }
+
+        allocationKind = selected.KeyOn ? VoiceAllocationKind.Steal : VoiceAllocationKind.ReleaseReuse;
+        if (selected.KeyOn)
+        {
+            KeyOffVoice(selected);
+        }
+
+        selected.Active = false;
+        selected.KeyOn = false;
+        selected.Sustained = false;
+        return bestIndex;
     }
 
     private int FindSameNoteVoiceIndex(int channel, int note, int program, byte bankMsb, byte bankLsb)
@@ -565,40 +599,6 @@ public sealed class OplSynth : IMidiSynth
 
             KeyOffVoice(voice);
         }
-    }
-
-    private int SelectVoiceToSteal(int midiChannel, int program, byte bankMsb, byte bankLsb)
-    {
-        int bestIndex = -1;
-        int bestCategory = int.MinValue;
-        int bestPriority = int.MinValue;
-        bool bestSameInstrument = false;
-        int bestAge = int.MaxValue;
-
-        for (int i = 0; i < _voices.Length; i++)
-        {
-            OplVoice voice = _voices[i];
-            if (!voice.Active || IsChannelUnavailableForAllocation(i))
-            {
-                continue;
-            }
-
-            int category = GetVoiceStealCategory(voice);
-            int priority = GetChannelPriority(voice.MidiChannel);
-            bool sameInstrument = voice.Program == program && voice.BankMsb == bankMsb && voice.BankLsb == bankLsb;
-            int age = voice.Age;
-
-            if (IsBetterStealCandidate(category, priority, sameInstrument, age, i, bestCategory, bestPriority, bestSameInstrument, bestAge, bestIndex))
-            {
-                bestCategory = category;
-                bestPriority = priority;
-                bestSameInstrument = sameInstrument;
-                bestAge = age;
-                bestIndex = i;
-            }
-        }
-
-        return bestIndex;
     }
 
     private void AllNotesOff(int channel)
@@ -675,6 +675,49 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    private void AdvanceVoiceTiming(int frames, int sampleRate)
+    {
+        if (frames <= 0 || sampleRate <= 0)
+        {
+            return;
+        }
+
+        long deltaUs = (long)Math.Round(frames * 1_000_000.0 / sampleRate);
+        if (deltaUs <= 0)
+        {
+            return;
+        }
+
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active)
+            {
+                continue;
+            }
+
+            if (voice.KeyOn)
+            {
+                if (voice.KeyOnRemainingUs > 0)
+                {
+                    voice.KeyOnRemainingUs = Math.Max(0, voice.KeyOnRemainingUs - deltaUs);
+                }
+
+                if (voice.VibDelayUs <= long.MaxValue - deltaUs)
+                {
+                    voice.VibDelayUs += deltaUs;
+                }
+                else
+                {
+                    voice.VibDelayUs = long.MaxValue;
+                }
+            }
+            else if (voice.KeyOffRemainingUs > 0)
+            {
+                voice.KeyOffRemainingUs = Math.Max(0, voice.KeyOffRemainingUs - deltaUs);
+            }
+        }
+    }
+
     private void UpdateChannelMeters()
     {
         Array.Clear(_channelActiveCounts, 0, _channelActiveCounts.Length);
@@ -700,6 +743,9 @@ public sealed class OplSynth : IMidiSynth
                 voice.Active = false;
                 voice.KeyOn = false;
                 voice.Sustained = false;
+                voice.KeyOnRemainingUs = 0;
+                voice.KeyOffRemainingUs = 0;
+                voice.VibDelayUs = 0;
                 continue;
             }
 
@@ -930,6 +976,11 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        if (voice.KeyOn)
+        {
+            BeginVoiceRelease(voice);
+        }
+
         voice.KeyOn = false;
         voice.Sustained = false;
 
@@ -937,6 +988,14 @@ public sealed class OplSynth : IMidiSynth
         {
             WriteFrequency(core, localChannel, channel.FNum, channel.Block, keyOn: false);
         }
+    }
+
+    private void BeginVoiceRelease(OplVoice voice)
+    {
+        OplInstrument source = voice.Instrument ?? _bankSet.DefaultInstrument;
+        voice.KeyOnRemainingUs = 0;
+        voice.KeyOffRemainingUs = GetInstrumentDelayUs(source.DelayOffMs);
+        voice.VibDelayUs = 0;
     }
 
     private bool IsPercussionChannel(int channel)
@@ -1394,55 +1453,121 @@ public sealed class OplSynth : IMidiSynth
         };
     }
 
-    private int GetChannelPriority(int channel)
+    private ChannelAllocMode ResolveAllocMode()
     {
-        if (channel < 0 || channel >= ChannelPriority.Length)
+        return _bankSet.VolumeModel switch
         {
-            return 3;
-        }
-
-        return ChannelPriority[channel];
+            VolumeModelHmi => ChannelAllocMode.AnyReleased,
+            VolumeModelHmiOld => ChannelAllocMode.AnyReleased,
+            VolumeModelMsAdlib => ChannelAllocMode.SameInstrument,
+            VolumeModelImfCreator => ChannelAllocMode.SameInstrument,
+            _ => ChannelAllocMode.OffDelay
+        };
     }
 
-    private int GetVoiceStealCategory(OplVoice voice)
+    private static bool IsSameInstrument(OplVoice voice, int program, byte bankMsb, byte bankLsb)
     {
+        return voice.Program == program && voice.BankMsb == bankMsb && voice.BankLsb == bankLsb;
+    }
+
+    private long CalculateVoiceGoodness(OplVoice voice, int program, byte bankMsb, byte bankLsb, ChannelAllocMode allocMode)
+    {
+        bool sameInstrument = IsSameInstrument(voice, program, bankMsb, bankLsb);
+
         if (!voice.KeyOn)
         {
-            return 2;
+            long koffMs = voice.KeyOffRemainingUs / 1000;
+            long score = -koffMs;
+
+            if (score < 0)
+            {
+                score -= 40000;
+
+                switch (allocMode)
+                {
+                    case ChannelAllocMode.SameInstrument:
+                        if (sameInstrument)
+                        {
+                            score = 0;
+                        }
+                        break;
+                    case ChannelAllocMode.AnyReleased:
+                        score = 0;
+                        break;
+                    default:
+                        if (sameInstrument)
+                        {
+                            score = -koffMs;
+                        }
+                        break;
+                }
+            }
+            else
+            {
+                score = 0;
+            }
+
+            return score;
         }
 
-        return voice.Sustained ? 1 : 0;
+        long konMs = voice.KeyOnRemainingUs / 1000;
+        long scoreActive = voice.Sustained
+            ? -(500000 + (konMs / 2))
+            : -(4000000 + konMs);
+
+        if (sameInstrument)
+        {
+            scoreActive += 300;
+            if (voice.VibDelayUs < 70000 || voice.KeyOnRemainingUs > 20000000)
+            {
+                scoreActive += 10;
+            }
+        }
+
+        if (IsPercussionChannel(voice.MidiChannel))
+        {
+            scoreActive += 50;
+        }
+
+        scoreActive += CountEvacuationStations(voice) * 4;
+        return scoreActive;
     }
 
-    private bool IsBetterStealCandidate(int category, int priority, bool sameInstrument, int age, int index,
-        int bestCategory, int bestPriority, bool bestSameInstrument, int bestAge, int bestIndex)
+    private int CountEvacuationStations(OplVoice target)
     {
-        if (bestIndex < 0)
+        int count = 0;
+        for (int i = 0; i < _voices.Length; i++)
         {
-            return true;
+            OplVoice voice = _voices[i];
+            if (!voice.Active || !voice.KeyOn)
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(voice, target))
+            {
+                continue;
+            }
+
+            if (voice.Sustained)
+            {
+                continue;
+            }
+
+            if (voice.VibDelayUs >= 200000)
+            {
+                continue;
+            }
+
+            if (!IsSameInstrument(voice, target.Program, target.BankMsb, target.BankLsb))
+            {
+                continue;
+            }
+
+            count++;
         }
 
-        if (category != bestCategory)
-        {
-            return category > bestCategory;
-        }
-
-        if (priority != bestPriority)
-        {
-            return priority > bestPriority;
-        }
-
-        if (sameInstrument != bestSameInstrument)
-        {
-            return sameInstrument;
-        }
-
-        if (age != bestAge)
-        {
-            return age < bestAge;
-        }
-
-        return index < bestIndex;
+        return count;
     }
 
     private bool IsChannelUnavailableForAllocation(int oplChannel)

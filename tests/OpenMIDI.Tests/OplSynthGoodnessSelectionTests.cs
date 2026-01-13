@@ -2,10 +2,10 @@ using OpenMIDI.Synth;
 
 namespace OpenMIDI.Tests;
 
-public sealed class OplSynthChannelPriorityTests
+public sealed class OplSynthGoodnessSelectionTests
 {
     [Fact]
-    public void VoiceSteal_PrefersLowestPriorityChannel()
+    public void VoiceSteal_PrefersLowestIndexWhenScoresEqual()
     {
         OplSynth synth = new OplSynth(OplSynthMode.Opl2);
 
@@ -27,10 +27,12 @@ public sealed class OplSynthChannelPriorityTests
         synth.CopyChannelMeters(counts, levels);
         Assert.Equal(1, counts[15]);
 
+        int stealsBefore = synth.VoiceStealCount;
         synth.NoteOn(0, 90, 100);
         RenderOnce(synth);
         synth.CopyChannelMeters(counts, levels);
-        Assert.Equal(0, counts[15]);
+        Assert.Equal(stealsBefore + 1, synth.VoiceStealCount);
+        Assert.Equal(1, counts[15]);
     }
 
     private static void RenderOnce(OplSynth synth)
