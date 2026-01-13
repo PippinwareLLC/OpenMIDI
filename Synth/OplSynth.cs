@@ -36,6 +36,7 @@ public sealed class OplSynth : IMidiSynth
         public bool Active;
         public bool KeyOn;
         public bool Sustained;
+        public bool FourOp;
         public int MidiChannel;
         public int Note;
         public int OplNote;
@@ -45,6 +46,7 @@ public sealed class OplSynth : IMidiSynth
         public byte BankLsb;
         public OplInstrument Instrument = OplInstrumentDefaults.DefaultInstrument;
         public int OplChannel;
+        public int SecondaryOplChannel;
         public int Age;
         public long KeyOnRemainingUs;
         public long KeyOffRemainingUs;
@@ -167,6 +169,7 @@ public sealed class OplSynth : IMidiSynth
             voice.Active = false;
             voice.KeyOn = false;
             voice.Sustained = false;
+            voice.FourOp = false;
             voice.MidiChannel = 0;
             voice.Note = 0;
             voice.OplNote = 0;
@@ -176,6 +179,7 @@ public sealed class OplSynth : IMidiSynth
             voice.BankLsb = 0;
             voice.Instrument = _bankSet.DefaultInstrument;
             voice.OplChannel = 0;
+            voice.SecondaryOplChannel = -1;
             voice.Age = 0;
             voice.KeyOnRemainingUs = 0;
             voice.KeyOffRemainingUs = 0;
@@ -231,11 +235,12 @@ public sealed class OplSynth : IMidiSynth
     }
 
     private void ConfigureVoiceForNote(OplVoice voice, int voiceIndex, int channel, int note, int oplNote,
-        int velocity, MidiChannelState channelState, OplInstrument instrument)
+        int velocity, MidiChannelState channelState, OplInstrument instrument, bool fourOp, int secondaryOplChannel)
     {
         voice.Active = true;
         voice.KeyOn = true;
         voice.Sustained = false;
+        voice.FourOp = fourOp;
         voice.MidiChannel = channel;
         voice.Note = note;
         voice.OplNote = oplNote;
@@ -245,6 +250,7 @@ public sealed class OplSynth : IMidiSynth
         voice.BankLsb = channelState.BankLsb;
         voice.Instrument = instrument;
         voice.OplChannel = voiceIndex;
+        voice.SecondaryOplChannel = secondaryOplChannel;
         voice.Age = _ageCounter++;
         InitializeVoiceTimers(voice, instrument);
     }
@@ -301,22 +307,55 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        bool wantsFourOp = IsFourOpInstrument(melodicInstrument) && _mode == OplSynthMode.Opl3;
         int reuseIndex = FindSameNoteVoiceIndex(channel, note, channelState.Program, channelState.BankMsb, channelState.BankLsb);
+        if (reuseIndex >= 0 && wantsFourOp && !_voices[reuseIndex].FourOp)
+        {
+            reuseIndex = -1;
+        }
+
         if (reuseIndex >= 0)
         {
             _sameNoteReuseCount++;
             KeyOffDuplicateVoices(channel, note, reuseIndex);
             OplVoice reuseVoice = _voices[reuseIndex];
-            KeyOffVoice(reuseVoice);
+            ReclaimVoice(reuseVoice);
+            int secondaryChannel = -1;
+            bool useFourOp = wantsFourOp;
+            if (useFourOp)
+            {
+                secondaryChannel = reuseVoice.SecondaryOplChannel;
+                if (secondaryChannel < 0 && !TryGetFourOpSecondaryChannel(reuseVoice.OplChannel, out secondaryChannel))
+                {
+                    useFourOp = false;
+                }
+            }
+
+            if (useFourOp)
+            {
+                EnableFourOpPair(reuseVoice.OplChannel);
+            }
+
             ConfigureVoiceForNote(reuseVoice, reuseIndex, channel, note, melodicNote, melodicVelocity, channelState,
-                melodicInstrument);
+                melodicInstrument, useFourOp, secondaryChannel);
             ApplyChannelRegisters(reuseVoice, channelState);
             return;
         }
 
         KeyOffDuplicateVoices(channel, note, -1);
-        int voiceIndex = AllocateVoiceIndex(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
-            out VoiceAllocationKind allocationKind);
+        int voiceIndex = 0;
+        int secondaryOplChannel = -1;
+        VoiceAllocationKind allocationKind = VoiceAllocationKind.Free;
+        bool useFourOpVoice = wantsFourOp &&
+            TryAllocateFourOpVoiceIndex(channelState.Program, channelState.BankMsb, channelState.BankLsb,
+                out voiceIndex, out secondaryOplChannel, out allocationKind);
+
+        if (!useFourOpVoice)
+        {
+            voiceIndex = AllocateVoiceIndex(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
+                out allocationKind);
+        }
+
         if (allocationKind == VoiceAllocationKind.ReleaseReuse)
         {
             _releaseReuseCount++;
@@ -326,9 +365,14 @@ public sealed class OplSynth : IMidiSynth
             _voiceStealCount++;
         }
 
+        if (useFourOpVoice)
+        {
+            EnableFourOpPair(voiceIndex);
+        }
+
         OplVoice voice = _voices[voiceIndex];
         ConfigureVoiceForNote(voice, voiceIndex, channel, note, melodicNote, melodicVelocity, channelState,
-            melodicInstrument);
+            melodicInstrument, useFourOpVoice, secondaryOplChannel);
         ApplyChannelRegisters(voice, channelState);
     }
 
@@ -540,15 +584,81 @@ public sealed class OplSynth : IMidiSynth
         }
 
         allocationKind = selected.KeyOn ? VoiceAllocationKind.Steal : VoiceAllocationKind.ReleaseReuse;
-        if (selected.KeyOn)
+        ReclaimVoice(selected);
+        return bestIndex;
+    }
+
+    private bool TryAllocateFourOpVoiceIndex(int program, byte bankMsb, byte bankLsb, out int primaryIndex,
+        out int secondaryIndex, out VoiceAllocationKind allocationKind)
+    {
+        primaryIndex = -1;
+        secondaryIndex = -1;
+        allocationKind = VoiceAllocationKind.Free;
+
+        ChannelAllocMode allocMode = ResolveAllocMode();
+        long bestScore = long.MinValue;
+        int bestPrimary = -1;
+        int bestSecondary = -1;
+        VoiceAllocationKind bestKind = VoiceAllocationKind.Free;
+
+        for (int i = 0; i < _voices.Length; i++)
         {
-            KeyOffVoice(selected);
+            if (!TryGetFourOpPairInfo(i, out _, out _, out int candidateSecondary, out _))
+            {
+                continue;
+            }
+
+            OplVoice primaryVoice = _voices[i];
+            OplVoice secondaryVoice = _voices[candidateSecondary];
+            long primaryScore = CalculateVoiceGoodness(primaryVoice, program, bankMsb, bankLsb, allocMode);
+            long secondaryScore = CalculateVoiceGoodness(secondaryVoice, program, bankMsb, bankLsb, allocMode);
+            long score = Math.Min(primaryScore, secondaryScore);
+            VoiceAllocationKind kind = GetPairAllocationKind(primaryVoice, secondaryVoice);
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestPrimary = i;
+                bestSecondary = candidateSecondary;
+                bestKind = kind;
+            }
         }
 
-        selected.Active = false;
-        selected.KeyOn = false;
-        selected.Sustained = false;
-        return bestIndex;
+        if (bestPrimary < 0 || bestSecondary < 0)
+        {
+            return false;
+        }
+
+        OplVoice selectedPrimary = _voices[bestPrimary];
+        OplVoice selectedSecondary = _voices[bestSecondary];
+
+        if (selectedPrimary.Active)
+        {
+            ReclaimVoice(selectedPrimary);
+        }
+
+        if (selectedSecondary.Active)
+        {
+            ReclaimVoice(selectedSecondary);
+        }
+
+        primaryIndex = bestPrimary;
+        secondaryIndex = bestSecondary;
+        allocationKind = bestKind;
+        return true;
+    }
+
+    private static VoiceAllocationKind GetPairAllocationKind(OplVoice primary, OplVoice secondary)
+    {
+        bool primaryActive = primary.Active;
+        bool secondaryActive = secondary.Active;
+        if (!primaryActive && !secondaryActive)
+        {
+            return VoiceAllocationKind.Free;
+        }
+
+        bool anyKeyOn = (primaryActive && primary.KeyOn) || (secondaryActive && secondary.KeyOn);
+        return anyKeyOn ? VoiceAllocationKind.Steal : VoiceAllocationKind.ReleaseReuse;
     }
 
     private int FindSameNoteVoiceIndex(int channel, int note, int program, byte bankMsb, byte bankLsb)
@@ -657,7 +767,18 @@ public sealed class OplSynth : IMidiSynth
             UpdateCarrierTotalLevel(voice, channelState);
             if (TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
             {
-                WriteChannelFeedback(core, localChannel, channelState, voice.Instrument ?? _bankSet.DefaultInstrument);
+                OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
+                if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+                    TryGetCore(voice.SecondaryOplChannel, out OplCore secondaryCore, out int secondaryLocalChannel) &&
+                    ReferenceEquals(core, secondaryCore))
+                {
+                    WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+                    WriteChannelFeedback(core, secondaryLocalChannel, channelState, instrument.FeedbackConnection2);
+                }
+                else
+                {
+                    WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+                }
             }
         }
     }
@@ -740,12 +861,7 @@ public sealed class OplSynth : IMidiSynth
 
             if (stage == OplEnvelopeStage.Off)
             {
-                voice.Active = false;
-                voice.KeyOn = false;
-                voice.Sustained = false;
-                voice.KeyOnRemainingUs = 0;
-                voice.KeyOffRemainingUs = 0;
-                voice.VibDelayUs = 0;
+                DeactivateVoice(voice);
                 continue;
             }
 
@@ -813,6 +929,11 @@ public sealed class OplSynth : IMidiSynth
 
     private bool TryGetVoiceEnvelopeInfo(OplVoice voice, out float level, out OplEnvelopeStage stage)
     {
+        if (voice.FourOp)
+        {
+            return TryGetFourOpEnvelopeInfo(voice, out level, out stage);
+        }
+
         if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel channel))
         {
             level = 0f;
@@ -833,6 +954,101 @@ public sealed class OplSynth : IMidiSynth
         return true;
     }
 
+    private bool TryGetFourOpEnvelopeInfo(OplVoice voice, out float level, out OplEnvelopeStage stage)
+    {
+        level = 0f;
+        stage = OplEnvelopeStage.Off;
+        if (voice.SecondaryOplChannel < 0)
+        {
+            return false;
+        }
+
+        if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel primary) ||
+            !TryGetChannel(voice.SecondaryOplChannel, out _, out _, out OplChannel secondary))
+        {
+            return false;
+        }
+
+        int op1Index = primary.ModulatorIndex;
+        int op2Index = primary.CarrierIndex;
+        int op3Index = secondary.ModulatorIndex;
+        int op4Index = secondary.CarrierIndex;
+        int algorithm = ((primary.Additive ? 1 : 0) << 1) | (secondary.Additive ? 1 : 0);
+
+        float maxLevel = 0f;
+        OplEnvelopeStage maxStage = OplEnvelopeStage.Off;
+        bool allOff = true;
+
+        bool Accumulate(int opIndex)
+        {
+            if (!TryGetOperatorEnvelopeInfo(core, opIndex, out float opLevel, out OplEnvelopeStage opStage))
+            {
+                return false;
+            }
+
+            if (opLevel > maxLevel)
+            {
+                maxLevel = opLevel;
+                maxStage = opStage;
+            }
+
+            if (opStage != OplEnvelopeStage.Off)
+            {
+                allOff = false;
+            }
+
+            return true;
+        }
+
+        switch (algorithm)
+        {
+            case 0:
+                if (!Accumulate(op4Index))
+                {
+                    return false;
+                }
+                break;
+            case 1:
+                if (!Accumulate(op2Index) || !Accumulate(op4Index))
+                {
+                    return false;
+                }
+                break;
+            case 2:
+                if (!Accumulate(op1Index) || !Accumulate(op4Index))
+                {
+                    return false;
+                }
+                break;
+            default:
+                if (!Accumulate(op1Index) || !Accumulate(op3Index) || !Accumulate(op4Index))
+                {
+                    return false;
+                }
+                break;
+        }
+
+        level = maxLevel;
+        stage = allOff ? OplEnvelopeStage.Off : maxStage;
+        return true;
+    }
+
+    private static bool TryGetOperatorEnvelopeInfo(OplCore core, int operatorIndex, out float level,
+        out OplEnvelopeStage stage)
+    {
+        level = 0f;
+        stage = OplEnvelopeStage.Off;
+        if (operatorIndex < 0 || operatorIndex >= core.Operators.Count)
+        {
+            return false;
+        }
+
+        OplEnvelope envelope = core.Operators[operatorIndex].Envelope;
+        level = envelope.Level;
+        stage = envelope.Stage;
+        return true;
+    }
+
     private void ApplyChannelRegisters(OplVoice voice, MidiChannelState channelState)
     {
         ConfigureChannelOperators(voice, channelState);
@@ -846,6 +1062,50 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
         OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
+        if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+            TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out int secondaryLocalChannel, out OplChannel secondaryChannel))
+        {
+            if (!ReferenceEquals(core, secondaryCore))
+            {
+                return;
+            }
+
+            OplOperatorPatch carrier1 = GetOperatorPatch(instrument, 0, OplInstrumentDefaults.DefaultCarrier);
+            OplOperatorPatch modulator1 = GetOperatorPatch(instrument, 1, OplInstrumentDefaults.DefaultModulator);
+            OplOperatorPatch carrier2 = GetOperatorPatch(instrument, 2, OplInstrumentDefaults.DefaultCarrier);
+            OplOperatorPatch modulator2 = GetOperatorPatch(instrument, 3, OplInstrumentDefaults.DefaultModulator);
+
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0x20, modulator1.AmVibEgtKsrMult);
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0x40, modulator1.KslTl);
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0x60, modulator1.ArDr);
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0x80, modulator1.SlRr);
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0xE0, modulator1.Waveform);
+
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x20, carrier1.AmVibEgtKsrMult);
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier1.KslTl));
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x60, carrier1.ArDr);
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x80, carrier1.SlRr);
+            WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, carrier1.Waveform);
+
+            WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0x20, modulator2.AmVibEgtKsrMult);
+            WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0x40, modulator2.KslTl);
+            WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0x60, modulator2.ArDr);
+            WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0x80, modulator2.SlRr);
+            WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0xE0, modulator2.Waveform);
+
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x20, carrier2.AmVibEgtKsrMult);
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl));
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x60, carrier2.ArDr);
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x80, carrier2.SlRr);
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0xE0, carrier2.Waveform);
+
+            WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+            WriteChannelFeedback(core, secondaryLocalChannel, channelState, instrument.FeedbackConnection2);
+            return;
+        }
+
         OplOperatorPatch carrier = GetOperatorPatch(instrument, 0, OplInstrumentDefaults.DefaultCarrier);
         OplOperatorPatch modulator = GetOperatorPatch(instrument, 1, OplInstrumentDefaults.DefaultModulator);
 
@@ -861,7 +1121,7 @@ public sealed class OplSynth : IMidiSynth
         WriteOperatorRegister(core, channel.CarrierIndex, 0x80, carrier.SlRr);
         WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, carrier.Waveform);
 
-        WriteChannelFeedback(core, localChannel, channelState, instrument);
+        WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
     }
 
     private void UpdateCarrierTotalLevel(OplVoice voice, MidiChannelState channelState)
@@ -872,7 +1132,21 @@ public sealed class OplSynth : IMidiSynth
         }
 
         OplOperatorPatch carrier = GetOperatorPatch(voice.Instrument, 0, OplInstrumentDefaults.DefaultCarrier);
-        WriteOperatorRegister(core, channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl));
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
+            ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl));
+
+        if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+            TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out _, out OplChannel secondaryChannel))
+        {
+            if (!ReferenceEquals(core, secondaryCore))
+            {
+                return;
+            }
+
+            OplOperatorPatch carrier2 = GetOperatorPatch(voice.Instrument, 2, OplInstrumentDefaults.DefaultCarrier);
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
+                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl));
+        }
     }
 
     private byte ComputeCarrierTotalLevel(MidiChannelState channelState, int velocity, byte baseKslTl)
@@ -922,9 +1196,9 @@ public sealed class OplSynth : IMidiSynth
         core.WriteRegister(baseB0, high);
     }
 
-    private void WriteChannelFeedback(OplCore core, int channelIndex, MidiChannelState channelState, OplInstrument instrument)
+    private void WriteChannelFeedback(OplCore core, int channelIndex, MidiChannelState channelState, byte feedbackConnection)
     {
-        byte value = (byte)(instrument.FeedbackConnection1 & 0x0F);
+        byte value = (byte)(feedbackConnection & 0x0F);
 
         if (_mode == OplSynthMode.Opl3)
         {
@@ -998,9 +1272,50 @@ public sealed class OplSynth : IMidiSynth
         voice.VibDelayUs = 0;
     }
 
+    private void ReclaimVoice(OplVoice voice)
+    {
+        if (!voice.Active)
+        {
+            return;
+        }
+
+        if (voice.KeyOn)
+        {
+            KeyOffVoice(voice);
+        }
+
+        DeactivateVoice(voice);
+    }
+
+    private void DeactivateVoice(OplVoice voice)
+    {
+        bool wasFourOp = voice.FourOp;
+        int primaryChannel = voice.OplChannel;
+        int secondaryChannel = voice.SecondaryOplChannel;
+
+        voice.Active = false;
+        voice.KeyOn = false;
+        voice.Sustained = false;
+        voice.FourOp = false;
+        voice.SecondaryOplChannel = -1;
+        voice.KeyOnRemainingUs = 0;
+        voice.KeyOffRemainingUs = 0;
+        voice.VibDelayUs = 0;
+
+        if (wasFourOp)
+        {
+            ReleaseFourOpPairIfUnused(primaryChannel, secondaryChannel);
+        }
+    }
+
     private bool IsPercussionChannel(int channel)
     {
         return channel == PercussionChannel;
+    }
+
+    private static bool IsFourOpInstrument(OplInstrument instrument)
+    {
+        return (instrument.Flags & OplInstrumentFlags.FourOp) != 0;
     }
 
     private bool TryResolveMelodicInstrument(MidiChannelState channelState, int note, int velocity,
@@ -1352,7 +1667,7 @@ public sealed class OplSynth : IMidiSynth
             _ => RhythmChannelStart
         };
 
-        WriteChannelFeedback(core, channelIndex, channelState, patch);
+        WriteChannelFeedback(core, channelIndex, channelState, patch.FeedbackConnection1);
     }
 
     private void SetRhythmChannelFrequency(OplCore core, RhythmInstrument instrument, int note, MidiChannelState channelState)
@@ -1383,9 +1698,7 @@ public sealed class OplSynth : IMidiSynth
             }
 
             KeyOffVoice(voice);
-            voice.Active = false;
-            voice.KeyOn = false;
-            voice.Sustained = false;
+            DeactivateVoice(voice);
         }
     }
 
@@ -1573,6 +1886,112 @@ public sealed class OplSynth : IMidiSynth
     private bool IsChannelUnavailableForAllocation(int oplChannel)
     {
         return IsChannelReservedForRhythm(oplChannel) || IsFourOperatorSecondaryChannel(oplChannel);
+    }
+
+    private bool TryGetFourOpPairInfo(int oplChannel, out OplCore core, out int localChannel,
+        out int secondaryChannel, out int pairBit)
+    {
+        core = null!;
+        localChannel = 0;
+        secondaryChannel = -1;
+        pairBit = -1;
+
+        if (_mode != OplSynthMode.Opl3)
+        {
+            return false;
+        }
+
+        if (!TryGetCore(oplChannel, out core, out localChannel))
+        {
+            return false;
+        }
+
+        if (!core.Registers.Opl3Enabled)
+        {
+            return false;
+        }
+
+        int local = localChannel;
+        if (local >= 0 && local <= 2)
+        {
+            pairBit = local;
+            secondaryChannel = oplChannel + 3;
+        }
+        else if (local >= 9 && local <= 11)
+        {
+            pairBit = (local - 9) + 3;
+            secondaryChannel = oplChannel + 3;
+        }
+        else
+        {
+            return false;
+        }
+
+        return secondaryChannel >= 0 && secondaryChannel < _voices.Length;
+    }
+
+    private bool TryGetFourOpSecondaryChannel(int oplChannel, out int secondaryChannel)
+    {
+        if (TryGetFourOpPairInfo(oplChannel, out _, out _, out secondaryChannel, out _))
+        {
+            return true;
+        }
+
+        secondaryChannel = -1;
+        return false;
+    }
+
+    private void EnableFourOpPair(int oplChannel)
+    {
+        if (!TryGetFourOpPairInfo(oplChannel, out OplCore core, out _, out _, out int pairBit))
+        {
+            return;
+        }
+
+        byte mask = core.Registers.FourOperatorEnableMask;
+        byte updated = (byte)(mask | (1 << pairBit));
+        if (updated != mask)
+        {
+            core.WriteRegister(0x104, updated);
+        }
+    }
+
+    private void ReleaseFourOpPairIfUnused(int primaryChannel, int secondaryChannel)
+    {
+        if (!TryGetFourOpPairInfo(primaryChannel, out OplCore core, out _, out int expectedSecondary, out int pairBit))
+        {
+            return;
+        }
+
+        if (secondaryChannel >= 0 && secondaryChannel != expectedSecondary)
+        {
+            return;
+        }
+
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || !voice.FourOp)
+            {
+                continue;
+            }
+
+            if (!TryGetFourOpPairInfo(voice.OplChannel, out OplCore voiceCore, out _, out _, out int voicePairBit))
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(core, voiceCore) && voicePairBit == pairBit)
+            {
+                return;
+            }
+        }
+
+        byte mask = core.Registers.FourOperatorEnableMask;
+        byte updated = (byte)(mask & ~(1 << pairBit));
+        if (updated != mask)
+        {
+            core.WriteRegister(0x104, updated);
+        }
     }
 
     private bool IsChannelReservedForRhythm(int oplChannel)

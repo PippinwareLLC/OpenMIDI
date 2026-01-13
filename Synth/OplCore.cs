@@ -274,6 +274,30 @@ public sealed class OplCore
                     continue;
                 }
 
+                if (IsFourOpSecondaryChannel(channelIndex))
+                {
+                    continue;
+                }
+
+                if (TryGetFourOpPair(channelIndex, out int secondaryIndex))
+                {
+                    float fourOpSample = RenderFourOperatorChannel(channel, _channels[secondaryIndex], outputSampleRate);
+                    bool fourOpLeftOn = channel.LeftEnable || (!channel.LeftEnable && !channel.RightEnable);
+                    bool fourOpRightOn = channel.RightEnable || (!channel.LeftEnable && !channel.RightEnable);
+
+                    if (fourOpLeftOn)
+                    {
+                        left += fourOpSample;
+                    }
+
+                    if (fourOpRightOn)
+                    {
+                        right += fourOpSample;
+                    }
+
+                    continue;
+                }
+
                 int modIndex = channel.ModulatorIndex;
                 int carIndex = channel.CarrierIndex;
                 if (modIndex < 0 || modIndex >= _operators.Length || carIndex < 0 || carIndex >= _operators.Length)
@@ -343,6 +367,68 @@ public sealed class OplCore
         {
             sample += RenderSingleOperator(RhythmOpTom, channel, outputSampleRate);
             sample += RenderNoiseOperator(RhythmOpTc, channel, noiseSample);
+        }
+
+        return sample;
+    }
+
+    private float RenderFourOperatorChannel(OplChannel primary, OplChannel secondary, int outputSampleRate)
+    {
+        int op1Index = primary.ModulatorIndex;
+        int op2Index = primary.CarrierIndex;
+        int op3Index = secondary.ModulatorIndex;
+        int op4Index = secondary.CarrierIndex;
+
+        if (op1Index < 0 || op2Index < 0 || op3Index < 0 || op4Index < 0 ||
+            op1Index >= _operators.Length || op2Index >= _operators.Length ||
+            op3Index >= _operators.Length || op4Index >= _operators.Length)
+        {
+            return 0f;
+        }
+
+        OplOperator op1 = _operators[op1Index];
+        OplOperator op2 = _operators[op2Index];
+        OplOperator op3 = _operators[op3Index];
+        OplOperator op4 = _operators[op4Index];
+
+        int algorithm = ((primary.Additive ? 1 : 0) << 1) | (secondary.Additive ? 1 : 0);
+        float op1Output = RenderOperator(op1, primary, outputSampleRate, 0f, primary.Feedback, applyFeedback: true);
+        float sample = 0f;
+
+        switch (algorithm)
+        {
+            case 0:
+            {
+                float op2Output = RenderOperator(op2, primary, outputSampleRate, op1Output * DefaultModulationIndex, 0, applyFeedback: false);
+                float op3Output = RenderOperator(op3, primary, outputSampleRate, op2Output * DefaultModulationIndex, 0, applyFeedback: false);
+                float op4Output = RenderOperator(op4, primary, outputSampleRate, op3Output * DefaultModulationIndex, 0, applyFeedback: false);
+                sample = op4Output;
+                break;
+            }
+            case 1:
+            {
+                float op2Output = RenderOperator(op2, primary, outputSampleRate, op1Output * DefaultModulationIndex, 0, applyFeedback: false);
+                float op3Output = RenderOperator(op3, primary, outputSampleRate, 0f, 0, applyFeedback: false);
+                float op4Output = RenderOperator(op4, primary, outputSampleRate, op3Output * DefaultModulationIndex, 0, applyFeedback: false);
+                sample = op2Output + op4Output;
+                break;
+            }
+            case 2:
+            {
+                float op2Output = RenderOperator(op2, primary, outputSampleRate, 0f, 0, applyFeedback: false);
+                float op3Output = RenderOperator(op3, primary, outputSampleRate, op2Output * DefaultModulationIndex, 0, applyFeedback: false);
+                float op4Output = RenderOperator(op4, primary, outputSampleRate, op3Output * DefaultModulationIndex, 0, applyFeedback: false);
+                sample = op1Output + op4Output;
+                break;
+            }
+            default:
+            {
+                float op2Output = RenderOperator(op2, primary, outputSampleRate, 0f, 0, applyFeedback: false);
+                float op3Output = RenderOperator(op3, primary, outputSampleRate, op2Output * DefaultModulationIndex, 0, applyFeedback: false);
+                float op4Output = RenderOperator(op4, primary, outputSampleRate, 0f, 0, applyFeedback: false);
+                sample = op1Output + op3Output + op4Output;
+                break;
+            }
         }
 
         return sample;
@@ -524,8 +610,20 @@ public sealed class OplCore
     private void UpdateChannelKeyCode(OplChannel channel)
     {
         channel.UpdateKeyCode(Registers.NoteSelectEnabled);
+        if (IsFourOpSecondaryChannel(channel.Index))
+        {
+            return;
+        }
+
         UpdateOperatorKeyCode(channel.ModulatorIndex, channel.KeyCode);
         UpdateOperatorKeyCode(channel.CarrierIndex, channel.KeyCode);
+
+        if (TryGetFourOpPair(channel.Index, out int secondaryIndex))
+        {
+            OplChannel secondary = _channels[secondaryIndex];
+            UpdateOperatorKeyCode(secondary.ModulatorIndex, channel.KeyCode);
+            UpdateOperatorKeyCode(secondary.CarrierIndex, channel.KeyCode);
+        }
     }
 
     private void UpdateOperatorKeyCode(int opIndex, int keyCode)
@@ -540,6 +638,11 @@ public sealed class OplCore
 
     private void SetChannelKeyOn(OplChannel channel, bool keyOn)
     {
+        if (IsFourOpSecondaryChannel(channel.Index))
+        {
+            return;
+        }
+
         if (channel.ModulatorIndex >= 0 && channel.ModulatorIndex < _operators.Length)
         {
             UpdateOperatorKey(_operators[channel.ModulatorIndex], keyOn);
@@ -548,6 +651,20 @@ public sealed class OplCore
         if (channel.CarrierIndex >= 0 && channel.CarrierIndex < _operators.Length)
         {
             UpdateOperatorKey(_operators[channel.CarrierIndex], keyOn);
+        }
+
+        if (TryGetFourOpPair(channel.Index, out int secondaryIndex))
+        {
+            OplChannel secondary = _channels[secondaryIndex];
+            if (secondary.ModulatorIndex >= 0 && secondary.ModulatorIndex < _operators.Length)
+            {
+                UpdateOperatorKey(_operators[secondary.ModulatorIndex], keyOn);
+            }
+
+            if (secondary.CarrierIndex >= 0 && secondary.CarrierIndex < _operators.Length)
+            {
+                UpdateOperatorKey(_operators[secondary.CarrierIndex], keyOn);
+            }
         }
     }
 
@@ -664,6 +781,49 @@ public sealed class OplCore
         }
 
         return index;
+    }
+
+    private bool TryGetFourOpPair(int channelIndex, out int secondaryIndex)
+    {
+        secondaryIndex = -1;
+        if (ChipType != OplChipType.Opl3 || !Registers.Opl3Enabled)
+        {
+            return false;
+        }
+
+        int bank = channelIndex / 9;
+        int local = channelIndex % 9;
+        if (local < 0 || local >= 3)
+        {
+            return false;
+        }
+
+        int bitIndex = local + bank * 3;
+        if ((Registers.FourOperatorEnableMask & (1 << bitIndex)) == 0)
+        {
+            return false;
+        }
+
+        secondaryIndex = channelIndex + 3;
+        return secondaryIndex >= 0 && secondaryIndex < _channels.Length;
+    }
+
+    private bool IsFourOpSecondaryChannel(int channelIndex)
+    {
+        if (ChipType != OplChipType.Opl3 || !Registers.Opl3Enabled)
+        {
+            return false;
+        }
+
+        int bank = channelIndex / 9;
+        int local = channelIndex % 9;
+        if (local < 3 || local > 5)
+        {
+            return false;
+        }
+
+        int bitIndex = (local - 3) + bank * 3;
+        return (Registers.FourOperatorEnableMask & (1 << bitIndex)) != 0;
     }
 
     private static int GetOperatorIndex(int bank, int offset)
