@@ -13,6 +13,7 @@ OPL core render path with a default 2-op patch while instrument mapping is expan
 - A 2-operator render path now drives phase accumulation, waveform selection, and feedback mixing.
 - Envelope rate tables are aligned with the ymfm reference and validated by tests.
 - The SDL example renders a live console VU/channel activity view during playback.
+- The SDL example includes a per-channel piano roll display.
 - Log-sine waveform tables and key scale attenuation are now in use.
 - Tremolo and vibrato LFOs are implemented with depth control.
 - OPL rhythm mode and percussion channels (BD/SD/TT/CY/HH) are implemented.

@@ -36,10 +36,12 @@ public static class Program
 
         MidiFile midi = MidiFile.Load(midiPath);
         OplSynth synth = new OplSynth(OplSynthMode.Opl3, chipCount);
-        MidiPlayer player = new MidiPlayer(synth);
+        MidiChannelNoteTracker noteTracker = new MidiChannelNoteTracker();
+        TrackingSynth trackingSynth = new TrackingSynth(synth, noteTracker);
+        MidiPlayer player = new MidiPlayer(trackingSynth);
         player.Load(midi);
 
-        PlaybackState state = new PlaybackState(player, synth, SampleRate, Channels);
+        PlaybackState state = new PlaybackState(player, trackingSynth, SampleRate, Channels);
         ConsoleStatusRenderer statusRenderer = new ConsoleStatusRenderer(state, midiPath);
         GCHandle handle = GCHandle.Alloc(state);
         statusRenderer.Initialize();
@@ -250,18 +252,70 @@ public static class Program
         Marshal.Copy(state.Buffer, 0, stream, sampleCount);
     }
 
+    private sealed class TrackingSynth : IMidiSynth
+    {
+        public TrackingSynth(OplSynth synth, MidiChannelNoteTracker tracker)
+        {
+            Synth = synth ?? throw new ArgumentNullException(nameof(synth));
+            Tracker = tracker ?? throw new ArgumentNullException(nameof(tracker));
+        }
+
+        public OplSynth Synth { get; }
+        public MidiChannelNoteTracker Tracker { get; }
+
+        public void Reset()
+        {
+            Tracker.Reset();
+            Synth.Reset();
+        }
+
+        public void NoteOn(int channel, int note, int velocity)
+        {
+            Tracker.NoteOn(channel, note, velocity);
+            Synth.NoteOn(channel, note, velocity);
+        }
+
+        public void NoteOff(int channel, int note, int velocity)
+        {
+            Tracker.NoteOff(channel, note, velocity);
+            Synth.NoteOff(channel, note, velocity);
+        }
+
+        public void ControlChange(int channel, int controller, int value)
+        {
+            Synth.ControlChange(channel, controller, value);
+        }
+
+        public void ProgramChange(int channel, int program)
+        {
+            Synth.ProgramChange(channel, program);
+        }
+
+        public void PitchBend(int channel, int value)
+        {
+            Synth.PitchBend(channel, value);
+        }
+
+        public void Render(float[] interleaved, int offset, int frames, int sampleRate)
+        {
+            Synth.Render(interleaved, offset, frames, sampleRate);
+        }
+    }
+
     private sealed class PlaybackState
     {
-        public PlaybackState(MidiPlayer player, OplSynth synth, int sampleRate, int channels)
+        public PlaybackState(MidiPlayer player, TrackingSynth synth, int sampleRate, int channels)
         {
             Player = player;
-            Synth = synth;
+            TrackingSynth = synth;
             SampleRate = sampleRate;
             Channels = channels;
         }
 
         public MidiPlayer Player { get; }
-        public OplSynth Synth { get; }
+        public TrackingSynth TrackingSynth { get; }
+        public OplSynth Synth => TrackingSynth.Synth;
+        public MidiChannelNoteTracker NoteTracker => TrackingSynth.Tracker;
         public int SampleRate { get; }
         public int Channels { get; }
         public float[] Buffer { get; set; } = Array.Empty<float>();
@@ -272,12 +326,20 @@ public static class Program
         private const int ChannelCount = 16;
         private const int VuBarWidth = 24;
         private const int ChannelBarWidth = 16;
+        private const int RollLowNote = 36;
+        private const int MinRollNoteCount = 12;
+        private const int MaxRollNoteCount = 60;
+        private static readonly string[] NoteNames =
+        {
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+        };
         private readonly PlaybackState _state;
         private readonly string _midiPath;
         private readonly int[] _channelCounts = new int[ChannelCount];
         private readonly float[] _channelLevels = new float[ChannelCount];
         private readonly bool _interactive;
         private int _lineWidth;
+        private int _rollNoteCount = 36;
 
         public ConsoleStatusRenderer(PlaybackState state, string midiPath)
         {
@@ -294,6 +356,7 @@ public static class Program
             }
 
             _lineWidth = GetLineWidth();
+            _rollNoteCount = CalculateRollNoteCount();
             Console.Clear();
             Console.CursorVisible = false;
         }
@@ -317,10 +380,12 @@ public static class Program
                 _lineWidth));
             builder.AppendLine(PadLine(BuildOplStatusLine(), _lineWidth));
             builder.AppendLine(PadLine("Channels:", _lineWidth));
+            builder.AppendLine(PadLine(BuildRollHeader(), _lineWidth));
 
             for (int i = 0; i < ChannelCount; i++)
             {
-                string line = $" CH{i + 1:00} {FormatBar(_channelLevels[i], ChannelBarWidth)} {_channelCounts[i],2} voice(s)";
+                string roll = BuildPianoRollLine(i);
+                string line = $" CH{i + 1:00} {FormatBar(_channelLevels[i], ChannelBarWidth)} {_channelCounts[i],2} voice(s) {roll}";
                 builder.AppendLine(PadLine(line, _lineWidth));
             }
 
@@ -366,6 +431,52 @@ public static class Program
             {
                 return 80;
             }
+        }
+
+        private int CalculateRollNoteCount()
+        {
+            int available = _lineWidth - (ChannelBarWidth + 20);
+            return Math.Clamp(available, MinRollNoteCount, MaxRollNoteCount);
+        }
+
+        private static string GetNoteLabel(int note)
+        {
+            int index = Math.Clamp(note, 0, 127);
+            int octave = index / 12 - 1;
+            string name = NoteNames[index % 12];
+            return $"{name}{octave}";
+        }
+
+        private string BuildRollHeader()
+        {
+            int highNote = GetRollHighNote();
+            return $"Roll {GetNoteLabel(RollLowNote)}..{GetNoteLabel(highNote)}";
+        }
+
+        private string BuildPianoRollLine(int channel)
+        {
+            int highNote = GetRollHighNote();
+            int count = highNote - RollLowNote + 1;
+            char[] buffer = new char[count];
+            for (int i = 0; i < count; i++)
+            {
+                int note = RollLowNote + i;
+                if (_state.NoteTracker.IsActive(channel, note))
+                {
+                    buffer[i] = '#';
+                }
+                else
+                {
+                    buffer[i] = note % 12 == 0 ? '|' : '.';
+                }
+            }
+
+            return new string(buffer);
+        }
+
+        private int GetRollHighNote()
+        {
+            return Math.Min(127, RollLowNote + _rollNoteCount - 1);
         }
 
         private string BuildOplStatusLine()
