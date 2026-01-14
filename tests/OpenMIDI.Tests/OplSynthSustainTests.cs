@@ -22,6 +22,27 @@ public sealed class OplSynthSustainTests
     }
 
     [Fact]
+    public void AllSoundsOff_DoesNotMuteWhileSustainActive()
+    {
+        OplSynth synth = new OplSynth(OplSynthMode.Opl2);
+
+        synth.NoteOn(0, 60, 100);
+        synth.ControlChange(0, 64, 127);
+        synth.NoteOff(0, 60, 0);
+
+        byte b0Sustain = synth.Core.ReadRegister(0xB0);
+        Assert.True((b0Sustain & 0x20) != 0);
+
+        synth.ControlChange(0, 120, 0);
+        byte b0AfterAllSoundsOff = synth.Core.ReadRegister(0xB0);
+        Assert.True((b0AfterAllSoundsOff & 0x20) != 0);
+
+        synth.ControlChange(0, 64, 0);
+        byte b0Released = synth.Core.ReadRegister(0xB0);
+        Assert.True((b0Released & 0x20) == 0);
+    }
+
+    [Fact]
     public void SustainPedal_SustainedVoiceIsStealCandidate()
     {
         OplSynth synth = new OplSynth(OplSynthMode.Opl2);

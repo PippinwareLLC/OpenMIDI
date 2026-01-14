@@ -36,6 +36,7 @@ public sealed class MidiEvent
     public byte MetaType { get; }
     public byte[]? MetaData { get; }
     public int TempoMicrosecondsPerQuarter { get; }
+    internal int SequenceIndex { get; set; }
 
     public bool IsTempo => Kind == MidiEventKind.Meta && MetaType == 0x51;
     public bool IsEndOfTrack => Kind == MidiEventKind.Meta && MetaType == 0x2F;

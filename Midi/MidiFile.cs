@@ -177,6 +177,7 @@ public sealed class MidiFile
             }
 
             MidiTrack track = new MidiTrack(trackIndex, events, trackName);
+            SortTrackEvents(events);
             tracks.Add(track);
             allEvents.AddRange(events);
         }
@@ -189,9 +190,186 @@ public sealed class MidiFile
                 return tickCompare;
             }
 
-            return left.TrackIndex.CompareTo(right.TrackIndex);
+            int trackCompare = left.TrackIndex.CompareTo(right.TrackIndex);
+            if (trackCompare != 0)
+            {
+                return trackCompare;
+            }
+
+            return left.SequenceIndex.CompareTo(right.SequenceIndex);
         });
 
         return new MidiFile(format, division, tracks, allEvents);
+    }
+
+    private static void SortTrackEvents(List<MidiEvent> events)
+    {
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        bool[] noteStates = new bool[16 * 128];
+        int sequenceIndex = 0;
+        int index = 0;
+
+        while (index < events.Count)
+        {
+            int tick = events[index].AbsoluteTicks;
+            int start = index;
+            while (index < events.Count && events[index].AbsoluteTicks == tick)
+            {
+                index++;
+            }
+
+            int count = index - start;
+            if (count <= 1)
+            {
+                MidiEvent single = events[start];
+                single.SequenceIndex = sequenceIndex++;
+                UpdateNoteState(noteStates, single);
+                continue;
+            }
+
+            List<MidiEvent> row = events.GetRange(start, count);
+            Dictionary<MidiEvent, int> originalOrder = new Dictionary<MidiEvent, int>(count);
+            for (int i = 0; i < row.Count; i++)
+            {
+                originalOrder[row[i]] = i;
+            }
+
+            row.Sort((left, right) =>
+            {
+                int priorityCompare = GetPriority(left).CompareTo(GetPriority(right));
+                if (priorityCompare != 0)
+                {
+                    return priorityCompare;
+                }
+
+                return originalOrder[left].CompareTo(originalOrder[right]);
+            });
+            AdjustNoteOffOrdering(row, noteStates);
+
+            for (int i = 0; i < count; i++)
+            {
+                MidiEvent midiEvent = row[i];
+                midiEvent.SequenceIndex = sequenceIndex++;
+                events[start + i] = midiEvent;
+            }
+        }
+    }
+
+    private static int GetPriority(MidiEvent midiEvent)
+    {
+        return midiEvent.Kind switch
+        {
+            MidiEventKind.SysEx => 0,
+            MidiEventKind.NoteOff => 1,
+            MidiEventKind.PolyAftertouch => 3,
+            MidiEventKind.ControlChange => 3,
+            MidiEventKind.ProgramChange => 3,
+            MidiEventKind.ChannelAftertouch => 3,
+            MidiEventKind.PitchBend => 3,
+            MidiEventKind.NoteOn => 4,
+            MidiEventKind.Meta when midiEvent.IsEndOfTrack => 20,
+            _ => 10
+        };
+    }
+
+    private static void AdjustNoteOffOrdering(List<MidiEvent> row, bool[] noteStates)
+    {
+        int maxSize = row.Count;
+        if (row.Count > 1)
+        {
+            for (int i = row.Count - 1; i >= 0; i--)
+            {
+                MidiEvent midiEvent = row[i];
+                if (midiEvent.Kind == MidiEventKind.NoteOff)
+                {
+                    break;
+                }
+
+                if (midiEvent.Kind != MidiEventKind.NoteOn)
+                {
+                    if (i == 0)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                int noteIndex = ((midiEvent.Channel & 0x0F) << 7) | (midiEvent.Data1 & 0x7F);
+                bool wasOn = noteStates[noteIndex];
+                int noteOffsOnSameNote = 0;
+
+                for (int j = 0; j < maxSize;)
+                {
+                    MidiEvent other = row[j];
+                    if (other.Kind == MidiEventKind.NoteOn)
+                    {
+                        break;
+                    }
+
+                    if (other.Kind != MidiEventKind.NoteOff)
+                    {
+                        j++;
+                        continue;
+                    }
+
+                    int otherIndex = ((other.Channel & 0x0F) << 7) | (other.Data1 & 0x7F);
+                    if (otherIndex == noteIndex)
+                    {
+                        if (!wasOn || noteOffsOnSameNote != 0)
+                        {
+                            if (j < row.Count - 1)
+                            {
+                                row.RemoveAt(j);
+                                row.Add(other);
+                                maxSize--;
+                                if (j < i)
+                                {
+                                    i--;
+                                }
+
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            noteOffsOnSameNote++;
+                        }
+                    }
+
+                    j++;
+                }
+
+                if (i == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        foreach (MidiEvent midiEvent in row)
+        {
+            UpdateNoteState(noteStates, midiEvent);
+        }
+    }
+
+    private static void UpdateNoteState(bool[] noteStates, MidiEvent midiEvent)
+    {
+        if (midiEvent.Kind != MidiEventKind.NoteOn && midiEvent.Kind != MidiEventKind.NoteOff)
+        {
+            return;
+        }
+
+        int index = ((midiEvent.Channel & 0x0F) << 7) | (midiEvent.Data1 & 0x7F);
+        if (index < 0 || index >= noteStates.Length)
+        {
+            return;
+        }
+
+        noteStates[index] = midiEvent.Kind == MidiEventKind.NoteOn;
     }
 }

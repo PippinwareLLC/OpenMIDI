@@ -8,6 +8,15 @@ public enum OplSynthMode
 
 public sealed class OplSynth : IMidiSynth
 {
+    [Flags]
+    private enum SynthMode
+    {
+        Gm = 0,
+        Gs = 1,
+        Xg = 2,
+        Gm2 = 4
+    }
+
     private enum VoiceAllocationKind
     {
         Free,
@@ -36,12 +45,15 @@ public sealed class OplSynth : IMidiSynth
         public bool Active;
         public bool KeyOn;
         public bool Sustained;
+        public bool Sostenuto;
         public bool FourOp;
         public int MidiChannel;
         public int Note;
         public int OplNote;
         public int Velocity;
         public int NoteAftertouch;
+        public int MulOffset;
+        public int OperatorOffset;
         public bool GlideActive;
         public double GlideCurrentNote;
         public double GlideTargetNote;
@@ -68,10 +80,14 @@ public sealed class OplSynth : IMidiSynth
         public int Volume = 100;
         public int Expression = 127;
         public int Pan = 64;
+        public int Brightness = 127;
         public bool SustainPedal;
+        public bool SostenutoPedal;
+        public bool SoftPedal;
         public int ModWheel;
         public int Aftertouch;
         public byte[] NoteAftertouch = new byte[128];
+        public bool IsXgPercussion;
         public int RpnMsb = 127;
         public int RpnLsb = 127;
         public bool RpnIsNrpn;
@@ -82,6 +98,9 @@ public sealed class OplSynth : IMidiSynth
         public int PortamentoSourceNote = -1;
         public double PortamentoRate = double.PositiveInfinity;
         public double ModulationPhase;
+        public double VibratoSpeedRad;
+        public double VibratoDepthSemitonesPerUnit;
+        public long VibratoDelayUs;
     }
 
     private const int MaxChipCount = 8;
@@ -95,12 +114,16 @@ public sealed class OplSynth : IMidiSynth
     private const int RhythmOpSd = 16;
     private const int RhythmOpTom = 14;
     private const int RhythmOpTc = 17;
-    private const byte VolumeModelHmi = 10;
-    private const byte VolumeModelHmiOld = 11;
-    private const byte VolumeModelMsAdlib = 12;
-    private const byte VolumeModelImfCreator = 13;
+    private const byte ManufacturerUniversalNonRealtime = 0x7E;
+    private const byte ManufacturerUniversalRealtime = 0x7F;
+    private const byte ManufacturerRoland = 0x41;
+    private const byte ManufacturerYamaha = 0x43;
+    private const byte RolandModelGs = 0x42;
+    private const byte RolandModeSend = 0x12;
+    private const byte YamahaModelXg = 0x4C;
+    private const byte SysExDeviceAll = 0x7F;
+    private const byte MasterVolumeDefault = 127;
     private const double VibratoDepthSemitonesPerUnit = 0.5 / 127.0;
-    private const double TremoloDepthPerUnit = 0.25 / 127.0;
     private static readonly double ModulationSpeedRad = 2.0 * Math.PI * 5.0;
     private static readonly double ModulationTwoPi = Math.PI * 2.0;
     private readonly OplCore[] _cores;
@@ -125,12 +148,30 @@ public sealed class OplSynth : IMidiSynth
     private readonly int[] _rhythmCounts = new int[RhythmInstrumentCount];
     private readonly RhythmInstrument[] _rhythmNoteMap = new RhythmInstrument[128];
     private readonly int[] _rhythmNoteCounts = new int[128];
+    private readonly OplInstrument?[] _rhythmInstruments = new OplInstrument?[RhythmInstrumentCount];
+    private readonly int[] _rhythmVelocities = new int[RhythmInstrumentCount];
     private OplInstrumentBankSet _bankSet = OplInstrumentBankSet.CreateDefault();
+    private SynthMode _synthMode = SynthMode.Xg;
+    private byte _masterVolume = MasterVolumeDefault;
+    private byte _sysExDeviceId;
     private bool _deepTremolo;
     private bool _deepVibrato;
     private static readonly int[] OperatorIndexToOffset =
     {
         0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21
+    };
+    private static readonly (bool DoMod, bool DoCar)[] DoOps =
+    {
+        (false, true),
+        (true, true),
+        (false, false),
+        (true, false),
+        (false, true),
+        (true, false),
+        (false, true),
+        (false, true),
+        (false, true),
+        (true, true)
     };
 
     public OplSynth(OplSynthMode mode = OplSynthMode.Opl3, int chips = 1)
@@ -187,17 +228,26 @@ public sealed class OplSynth : IMidiSynth
 
     public void Reset()
     {
+        _synthMode = SynthMode.Xg;
+        _masterVolume = MasterVolumeDefault;
+        _sysExDeviceId = 0;
+        int defaultVolume = GetDefaultVolume();
+        float defaultBendRange = GetDefaultPitchBendRange();
+
         foreach (OplVoice voice in _voices)
         {
             voice.Active = false;
             voice.KeyOn = false;
             voice.Sustained = false;
+            voice.Sostenuto = false;
             voice.FourOp = false;
             voice.MidiChannel = 0;
             voice.Note = 0;
             voice.OplNote = 0;
             voice.Velocity = 0;
             voice.NoteAftertouch = 0;
+            voice.MulOffset = 0;
+            voice.OperatorOffset = 0;
             voice.GlideActive = false;
             voice.GlideCurrentNote = 0;
             voice.GlideTargetNote = 0;
@@ -220,14 +270,18 @@ public sealed class OplSynth : IMidiSynth
             channel.BankMsb = 0;
             channel.BankLsb = 0;
             channel.PitchBend = 8192;
-            channel.PitchBendRangeSemitones = PitchBendRangeSemitones;
-            channel.Volume = 100;
+            channel.PitchBendRangeSemitones = defaultBendRange;
+            channel.Volume = defaultVolume;
             channel.Expression = 127;
             channel.Pan = 64;
+            channel.Brightness = 127;
             channel.SustainPedal = false;
+            channel.SostenutoPedal = false;
+            channel.SoftPedal = false;
             channel.ModWheel = 0;
             channel.Aftertouch = 0;
             Array.Clear(channel.NoteAftertouch, 0, channel.NoteAftertouch.Length);
+            channel.IsXgPercussion = false;
             channel.RpnMsb = 127;
             channel.RpnLsb = 127;
             channel.RpnIsNrpn = false;
@@ -238,6 +292,9 @@ public sealed class OplSynth : IMidiSynth
             channel.PortamentoSourceNote = -1;
             channel.PortamentoRate = double.PositiveInfinity;
             channel.ModulationPhase = 0;
+            channel.VibratoSpeedRad = ModulationSpeedRad;
+            channel.VibratoDepthSemitonesPerUnit = VibratoDepthSemitonesPerUnit;
+            channel.VibratoDelayUs = 0;
         }
 
         _ageCounter = 0;
@@ -256,6 +313,8 @@ public sealed class OplSynth : IMidiSynth
         Array.Clear(_rhythmCounts, 0, _rhythmCounts.Length);
         Array.Clear(_rhythmNoteCounts, 0, _rhythmNoteCounts.Length);
         Array.Clear(_rhythmNoteMap, 0, _rhythmNoteMap.Length);
+        Array.Clear(_rhythmInstruments, 0, _rhythmInstruments.Length);
+        Array.Clear(_rhythmVelocities, 0, _rhythmVelocities.Length);
         foreach (OplCore core in _cores)
         {
             core.Reset();
@@ -276,19 +335,32 @@ public sealed class OplSynth : IMidiSynth
         ApplyLfoDepths();
     }
 
+    private int GetDefaultVolume()
+    {
+        return _bankSet.Mt32Defaults ? 127 : 100;
+    }
+
+    private float GetDefaultPitchBendRange()
+    {
+        return _bankSet.Mt32Defaults ? 12f : PitchBendRangeSemitones;
+    }
+
     private void ConfigureVoiceForNote(OplVoice voice, int voiceIndex, int channel, int note, int oplNote,
         int velocity, MidiChannelState channelState, OplInstrument instrument, bool fourOp, int secondaryOplChannel,
-        bool portamentoEnabled, int portamentoSourceNote)
+        int operatorOffset, bool portamentoEnabled, int portamentoSourceNote)
     {
         voice.Active = true;
         voice.KeyOn = true;
         voice.Sustained = false;
+        voice.Sostenuto = false;
         voice.FourOp = fourOp;
         voice.MidiChannel = channel;
         voice.Note = note;
         voice.OplNote = oplNote;
         voice.Velocity = velocity;
         voice.NoteAftertouch = 0;
+        voice.MulOffset = 0;
+        voice.OperatorOffset = operatorOffset;
         voice.GlideActive = false;
         voice.GlideCurrentNote = oplNote;
         voice.GlideTargetNote = oplNote;
@@ -307,7 +379,7 @@ public sealed class OplSynth : IMidiSynth
 
         if (portamentoEnabled && portamentoSourceNote >= 0)
         {
-            voice.GlideCurrentNote = AdjustNote(portamentoSourceNote, instrument, isPercussion: false);
+            voice.GlideCurrentNote = portamentoSourceNote;
             voice.GlideTargetNote = oplNote;
             voice.GlideRate = channelState.PortamentoRate;
             voice.GlideActive = voice.GlideRate > 0 && !double.IsInfinity(voice.GlideRate);
@@ -356,6 +428,11 @@ public sealed class OplSynth : IMidiSynth
                 return;
             }
 
+            if (channelState.SoftPedal)
+            {
+                adjustedVelocity = (int)Math.Floor(adjustedVelocity * 0.8f);
+            }
+
             HandlePercussionNoteOn(note, adjustedVelocity, instrument, oplNote, rhythmInstrument, channelState);
             return;
         }
@@ -370,73 +447,132 @@ public sealed class OplSynth : IMidiSynth
         bool portamentoEnabled = channelState.PortamentoEnabled && channelState.PortamentoRate < double.PositiveInfinity;
         channelState.PortamentoSourceNote = note;
 
-        bool wantsFourOp = IsFourOpInstrument(melodicInstrument) && _mode == OplSynthMode.Opl3;
-        int reuseIndex = FindSameNoteVoiceIndex(channel, note, channelState.Program, channelState.BankMsb, channelState.BankLsb);
-        if (reuseIndex >= 0 && wantsFourOp && !_voices[reuseIndex].FourOp)
+        if (channelState.SoftPedal)
         {
-            reuseIndex = -1;
+            melodicVelocity = (int)Math.Floor(melodicVelocity * 0.8f);
         }
 
-        if (reuseIndex >= 0)
+        bool wantsFourOp = IsFourOpInstrument(melodicInstrument) && _mode == OplSynthMode.Opl3;
+        bool wantsPseudoFourOp = !wantsFourOp && IsPseudoFourOpInstrument(melodicInstrument);
+
+        if (wantsFourOp)
         {
-            _sameNoteReuseCount++;
-            KeyOffDuplicateVoices(channel, note, reuseIndex);
-            OplVoice reuseVoice = _voices[reuseIndex];
-            ReclaimVoice(reuseVoice);
-            int secondaryChannel = -1;
-            bool useFourOp = wantsFourOp;
-            if (useFourOp)
+            int reuseIndex = FindSameNoteVoiceIndex(channel, note, channelState.Program, channelState.BankMsb,
+                channelState.BankLsb, operatorOffset: 0);
+            if (reuseIndex >= 0 && !_voices[reuseIndex].FourOp)
             {
+                reuseIndex = -1;
+            }
+
+            if (reuseIndex >= 0)
+            {
+                _sameNoteReuseCount++;
+                KeyOffDuplicateVoices(channel, note, reuseIndex);
+                OplVoice reuseVoice = _voices[reuseIndex];
+                ReclaimVoice(reuseVoice);
+                int secondaryChannel = -1;
+                bool useFourOp = true;
+
                 secondaryChannel = reuseVoice.SecondaryOplChannel;
                 if (secondaryChannel < 0 && !TryGetFourOpSecondaryChannel(reuseVoice.OplChannel, out secondaryChannel))
                 {
                     useFourOp = false;
                 }
+
+                if (useFourOp)
+                {
+                    EnableFourOpPair(reuseVoice.OplChannel);
+                }
+
+                ConfigureVoiceForNote(reuseVoice, reuseIndex, channel, note, melodicNote, melodicVelocity, channelState,
+                    melodicInstrument, useFourOp, secondaryChannel, operatorOffset: 0, portamentoEnabled, portamentoSourceNote);
+                ApplyChannelRegisters(reuseVoice, channelState);
+                return;
             }
 
-            if (useFourOp)
+            KeyOffDuplicateVoices(channel, note, -1);
+            int voiceIndex = 0;
+            int secondaryOplChannel = -1;
+            VoiceAllocationKind allocationKind = VoiceAllocationKind.Free;
+            bool useFourOpVoice =
+                TryAllocateFourOpVoiceIndex(channelState.Program, channelState.BankMsb, channelState.BankLsb,
+                    out voiceIndex, out secondaryOplChannel, out allocationKind);
+
+            if (!useFourOpVoice)
             {
-                EnableFourOpPair(reuseVoice.OplChannel);
+                voiceIndex = AllocateVoiceIndex(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
+                    out allocationKind);
             }
 
-            ConfigureVoiceForNote(reuseVoice, reuseIndex, channel, note, melodicNote, melodicVelocity, channelState,
-                melodicInstrument, useFourOp, secondaryChannel, portamentoEnabled, portamentoSourceNote);
+            if (allocationKind == VoiceAllocationKind.ReleaseReuse)
+            {
+                _releaseReuseCount++;
+            }
+            else if (allocationKind == VoiceAllocationKind.Steal)
+            {
+                _voiceStealCount++;
+            }
+
+            if (useFourOpVoice)
+            {
+                EnableFourOpPair(voiceIndex);
+            }
+
+            OplVoice voice = _voices[voiceIndex];
+            ConfigureVoiceForNote(voice, voiceIndex, channel, note, melodicNote, melodicVelocity, channelState,
+                melodicInstrument, useFourOpVoice, secondaryOplChannel, operatorOffset: 0, portamentoEnabled, portamentoSourceNote);
+            ApplyChannelRegisters(voice, channelState);
+            return;
+        }
+
+        int reusePrimary = FindSameNoteVoiceIndex(channel, note, channelState.Program, channelState.BankMsb,
+            channelState.BankLsb, operatorOffset: 0);
+        if (reusePrimary >= 0 && _voices[reusePrimary].FourOp)
+        {
+            reusePrimary = -1;
+        }
+
+        if (reusePrimary >= 0)
+        {
+            _sameNoteReuseCount++;
+            KeyOffDuplicateVoices(channel, note, reusePrimary);
+            OplVoice reuseVoice = _voices[reusePrimary];
+            ReclaimVoice(reuseVoice);
+            ConfigureVoiceForNote(reuseVoice, reusePrimary, channel, note, melodicNote, melodicVelocity, channelState,
+                melodicInstrument, fourOp: false, secondaryOplChannel: -1, operatorOffset: 0, portamentoEnabled, portamentoSourceNote);
             ApplyChannelRegisters(reuseVoice, channelState);
+
+            if (wantsPseudoFourOp)
+            {
+                TryStartPseudoSecondVoice(channelState, channel, note, melodicNote, melodicVelocity, melodicInstrument,
+                    portamentoEnabled, portamentoSourceNote, reusePrimary);
+            }
             return;
         }
 
         KeyOffDuplicateVoices(channel, note, -1);
-        int voiceIndex = 0;
-        int secondaryOplChannel = -1;
-        VoiceAllocationKind allocationKind = VoiceAllocationKind.Free;
-        bool useFourOpVoice = wantsFourOp &&
-            TryAllocateFourOpVoiceIndex(channelState.Program, channelState.BankMsb, channelState.BankLsb,
-                out voiceIndex, out secondaryOplChannel, out allocationKind);
+        int primaryIndex = AllocateVoiceIndex(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
+            out VoiceAllocationKind primaryKind);
 
-        if (!useFourOpVoice)
-        {
-            voiceIndex = AllocateVoiceIndex(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
-                out allocationKind);
-        }
-
-        if (allocationKind == VoiceAllocationKind.ReleaseReuse)
+        if (primaryKind == VoiceAllocationKind.ReleaseReuse)
         {
             _releaseReuseCount++;
         }
-        else if (allocationKind == VoiceAllocationKind.Steal)
+        else if (primaryKind == VoiceAllocationKind.Steal)
         {
             _voiceStealCount++;
         }
 
-        if (useFourOpVoice)
-        {
-            EnableFourOpPair(voiceIndex);
-        }
+        OplVoice primaryVoice = _voices[primaryIndex];
+        ConfigureVoiceForNote(primaryVoice, primaryIndex, channel, note, melodicNote, melodicVelocity, channelState,
+            melodicInstrument, fourOp: false, secondaryOplChannel: -1, operatorOffset: 0, portamentoEnabled, portamentoSourceNote);
+        ApplyChannelRegisters(primaryVoice, channelState);
 
-        OplVoice voice = _voices[voiceIndex];
-        ConfigureVoiceForNote(voice, voiceIndex, channel, note, melodicNote, melodicVelocity, channelState,
-            melodicInstrument, useFourOpVoice, secondaryOplChannel, portamentoEnabled, portamentoSourceNote);
-        ApplyChannelRegisters(voice, channelState);
+        if (wantsPseudoFourOp)
+        {
+            TryStartPseudoSecondVoice(channelState, channel, note, melodicNote, melodicVelocity, melodicInstrument,
+                portamentoEnabled, portamentoSourceNote, primaryIndex);
+        }
     }
 
     public void NoteOff(int channel, int note, int velocity)
@@ -460,6 +596,11 @@ public sealed class OplSynth : IMidiSynth
                 if (channelState.SustainPedal)
                 {
                     voice.Sustained = true;
+                    continue;
+                }
+
+                if (voice.Sostenuto)
+                {
                     continue;
                 }
 
@@ -522,9 +663,17 @@ public sealed class OplSynth : IMidiSynth
                 break;
             case 0:
                 channelState.BankMsb = (byte)clamped;
+                if ((_synthMode & SynthMode.Gs) == 0)
+                {
+                    channelState.IsXgPercussion = IsXgPercussionBank(channelState);
+                }
                 break;
             case 32:
                 channelState.BankLsb = (byte)clamped;
+                if ((_synthMode & SynthMode.Gs) == 0)
+                {
+                    channelState.IsXgPercussion = IsXgPercussionBank(channelState);
+                }
                 break;
             case 5:
                 channelState.PortamentoValue = (channelState.PortamentoValue & 0x007F) | (clamped << 7);
@@ -551,10 +700,17 @@ public sealed class OplSynth : IMidiSynth
                 UpdateChannelGains(channel, channelState);
                 break;
             case 64:
-                if (!IsPercussionChannel(channel))
-                {
-                    UpdateSustainPedal(channel, channelState, clamped >= 64);
-                }
+                UpdateSustainPedal(channel, channelState, clamped >= 64);
+                break;
+            case 66:
+                UpdateSostenutoPedal(channel, channelState, clamped >= 64);
+                break;
+            case 67:
+                channelState.SoftPedal = clamped >= 64;
+                break;
+            case 74:
+                channelState.Brightness = clamped;
+                UpdateChannelGains(channel, channelState);
                 break;
             case 98:
                 channelState.RpnLsb = clamped;
@@ -574,16 +730,18 @@ public sealed class OplSynth : IMidiSynth
                 break;
             case 6:
                 channelState.RpnDataMsb = clamped;
-                ApplyRpnData(channel, channelState);
+                ApplyRpnData(channel, channelState, dataIsMsb: true);
                 break;
             case 38:
                 channelState.RpnDataLsb = clamped;
-                ApplyRpnData(channel, channelState);
+                ApplyRpnData(channel, channelState, dataIsMsb: false);
                 break;
             case 121:
                 ResetChannelControllers(channel, channelState);
                 break;
             case 120:
+                AllSoundsOff(channel);
+                break;
             case 123:
                 AllNotesOff(channel);
                 break;
@@ -610,6 +768,34 @@ public sealed class OplSynth : IMidiSynth
         MidiChannelState channelState = _channels[channel];
         channelState.PitchBend = value;
         UpdateChannelFrequencies(channel, channelState);
+    }
+
+    public void SysEx(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 4 || data[0] != 0xF0 || data[^1] != 0xF7)
+        {
+            return;
+        }
+
+        byte manufacturer = data[1];
+        byte dev = data[2];
+        ReadOnlySpan<byte> payload = data.Slice(3, data.Length - 4);
+
+        switch (manufacturer)
+        {
+            case ManufacturerUniversalNonRealtime:
+                ProcessUniversalSysEx(dev, realtime: false, payload);
+                break;
+            case ManufacturerUniversalRealtime:
+                ProcessUniversalSysEx(dev, realtime: true, payload);
+                break;
+            case ManufacturerRoland:
+                ProcessRolandSysEx(dev, payload);
+                break;
+            case ManufacturerYamaha:
+                ProcessYamahaSysEx(dev, payload);
+                break;
+        }
     }
 
     public void Render(float[] interleaved, int offset, int frames, int sampleRate)
@@ -735,6 +921,54 @@ public sealed class OplSynth : IMidiSynth
         return bestIndex;
     }
 
+    private int AllocateVoiceIndexExcluding(int midiChannel, int program, byte bankMsb, byte bankLsb, int excludeIndex,
+        out VoiceAllocationKind allocationKind)
+    {
+        _ = midiChannel;
+        ChannelAllocMode allocMode = ResolveAllocMode();
+        long bestScore = long.MinValue;
+        int bestIndex = -1;
+
+        for (int i = 0; i < _voices.Length; i++)
+        {
+            if (i == excludeIndex)
+            {
+                continue;
+            }
+
+            if (IsChannelUnavailableForAllocation(i))
+            {
+                continue;
+            }
+
+            OplVoice voice = _voices[i];
+            long score = CalculateVoiceGoodness(voice, program, bankMsb, bankLsb, allocMode);
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestIndex = i;
+            }
+        }
+
+        if (bestIndex < 0)
+        {
+            allocationKind = VoiceAllocationKind.Free;
+            return -1;
+        }
+
+        OplVoice selected = _voices[bestIndex];
+        if (!selected.Active)
+        {
+            allocationKind = VoiceAllocationKind.Free;
+            return bestIndex;
+        }
+
+        allocationKind = selected.KeyOn ? VoiceAllocationKind.Steal : VoiceAllocationKind.ReleaseReuse;
+        ReclaimVoice(selected);
+        return bestIndex;
+    }
+
     private bool TryAllocateFourOpVoiceIndex(int program, byte bankMsb, byte bankLsb, out int primaryIndex,
         out int secondaryIndex, out VoiceAllocationKind allocationKind)
     {
@@ -795,6 +1029,32 @@ public sealed class OplSynth : IMidiSynth
         return true;
     }
 
+    private void TryStartPseudoSecondVoice(MidiChannelState channelState, int channel, int note, int oplNote, int velocity,
+        OplInstrument instrument, bool portamentoEnabled, int portamentoSourceNote, int primaryIndex)
+    {
+        int secondaryIndex = AllocateVoiceIndexExcluding(channel, channelState.Program, channelState.BankMsb, channelState.BankLsb,
+            primaryIndex, out VoiceAllocationKind allocationKind);
+
+        if (secondaryIndex < 0)
+        {
+            return;
+        }
+
+        if (allocationKind == VoiceAllocationKind.ReleaseReuse)
+        {
+            _releaseReuseCount++;
+        }
+        else if (allocationKind == VoiceAllocationKind.Steal)
+        {
+            _voiceStealCount++;
+        }
+
+        OplVoice secondaryVoice = _voices[secondaryIndex];
+        ConfigureVoiceForNote(secondaryVoice, secondaryIndex, channel, note, oplNote, velocity, channelState,
+            instrument, fourOp: false, secondaryOplChannel: -1, operatorOffset: 2, portamentoEnabled, portamentoSourceNote);
+        ApplyChannelRegisters(secondaryVoice, channelState);
+    }
+
     private static VoiceAllocationKind GetPairAllocationKind(OplVoice primary, OplVoice secondary)
     {
         bool primaryActive = primary.Active;
@@ -808,7 +1068,7 @@ public sealed class OplSynth : IMidiSynth
         return anyKeyOn ? VoiceAllocationKind.Steal : VoiceAllocationKind.ReleaseReuse;
     }
 
-    private int FindSameNoteVoiceIndex(int channel, int note, int program, byte bankMsb, byte bankLsb)
+    private int FindSameNoteVoiceIndex(int channel, int note, int program, byte bankMsb, byte bankLsb, int operatorOffset)
     {
         int candidate = -1;
         for (int i = 0; i < _voices.Length; i++)
@@ -816,6 +1076,11 @@ public sealed class OplSynth : IMidiSynth
             OplVoice voice = _voices[i];
             if (!voice.Active || voice.MidiChannel != channel || voice.Note != note ||
                 voice.Program != program || voice.BankMsb != bankMsb || voice.BankLsb != bankLsb)
+            {
+                continue;
+            }
+
+            if (voice.OperatorOffset != operatorOffset)
             {
                 continue;
             }
@@ -866,12 +1131,55 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        MidiChannelState channelState = _channels[channel];
         foreach (OplVoice voice in _voices)
         {
             if (voice.Active && voice.MidiChannel == channel)
             {
+                if (channelState.SustainPedal)
+                {
+                    voice.Sustained = true;
+                    continue;
+                }
+
+                if (voice.Sostenuto)
+                {
+                    continue;
+                }
+
                 KeyOffVoice(voice);
             }
+        }
+    }
+
+    private void AllSoundsOff(int channel)
+    {
+        if (IsPercussionChannel(channel))
+        {
+            ClearRhythmNotes();
+            return;
+        }
+
+        MidiChannelState channelState = _channels[channel];
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || voice.MidiChannel != channel)
+            {
+                continue;
+            }
+
+            if (channelState.SustainPedal)
+            {
+                voice.Sustained = true;
+                continue;
+            }
+
+            if (voice.Sostenuto)
+            {
+                continue;
+            }
+
+            MuteVoice(voice);
         }
     }
 
@@ -889,12 +1197,40 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    private void UpdateSostenutoPedal(int channel, MidiChannelState channelState, bool enabled)
+    {
+        if (channelState.SostenutoPedal == enabled)
+        {
+            return;
+        }
+
+        channelState.SostenutoPedal = enabled;
+        if (enabled)
+        {
+            foreach (OplVoice voice in _voices)
+            {
+                if (!voice.Active || voice.MidiChannel != channel || !voice.KeyOn || voice.Sustained)
+                {
+                    continue;
+                }
+
+                voice.Sostenuto = true;
+            }
+        }
+        else
+        {
+            ReleaseSostenutoVoices(channel);
+        }
+    }
+
     private void ResetChannelControllers(int channel, MidiChannelState channelState)
     {
         channelState.PitchBend = 8192;
-        channelState.PitchBendRangeSemitones = PitchBendRangeSemitones;
+        channelState.PitchBendRangeSemitones = GetDefaultPitchBendRange();
         channelState.Expression = 127;
         channelState.SustainPedal = false;
+        channelState.SostenutoPedal = false;
+        channelState.SoftPedal = false;
         channelState.ModWheel = 0;
         channelState.Aftertouch = 0;
         Array.Clear(channelState.NoteAftertouch, 0, channelState.NoteAftertouch.Length);
@@ -908,23 +1244,61 @@ public sealed class OplSynth : IMidiSynth
         channelState.PortamentoSourceNote = -1;
         channelState.PortamentoRate = double.PositiveInfinity;
         channelState.ModulationPhase = 0;
+        channelState.VibratoSpeedRad = ModulationSpeedRad;
+        channelState.VibratoDepthSemitonesPerUnit = VibratoDepthSemitonesPerUnit;
+        channelState.VibratoDelayUs = 0;
 
         ReleaseSustainedVoices(channel);
+        ReleaseSostenutoVoices(channel);
         UpdateChannelGains(channel, channelState);
         UpdateChannelFrequencies(channel, channelState);
         UpdateChannelModulation(channel, channelState);
     }
 
-    private void ApplyRpnData(int channel, MidiChannelState channelState)
+    private void ApplyRpnData(int channel, MidiChannelState channelState, bool dataIsMsb)
     {
         if (channelState.RpnIsNrpn)
         {
+            if ((_synthMode & SynthMode.Xg) == 0 || !dataIsMsb)
+            {
+                return;
+            }
+
+            int address = (channelState.RpnMsb << 8) | channelState.RpnLsb;
+            int value = channelState.RpnDataMsb;
+            switch (address)
+            {
+                case 0x0108:
+                    if (value == 64)
+                    {
+                        channelState.VibratoSpeedRad = ModulationSpeedRad;
+                    }
+                    else if (value < 100)
+                    {
+                        int divisor = value == 0 ? 1 : value;
+                        channelState.VibratoSpeedRad = (1.0 / (1.6e-2 * divisor)) * ModulationSpeedRad;
+                    }
+                    else
+                    {
+                        channelState.VibratoSpeedRad = (1.0 / (0.051153846 * value - 3.4965385)) * ModulationSpeedRad;
+                    }
+                    break;
+                case 0x0109:
+                    channelState.VibratoDepthSemitonesPerUnit = ((value - 64) * 0.15) * 0.01;
+                    break;
+                case 0x010A:
+                    channelState.VibratoDelayUs = value == 0
+                        ? 0
+                        : (long)Math.Round(209.2 * Math.Exp(0.0795 * value));
+                    break;
+            }
+
             return;
         }
 
         if (channelState.RpnMsb == 0 && channelState.RpnLsb == 0)
         {
-            float semitones = channelState.RpnDataMsb + channelState.RpnDataLsb / 100f;
+            float semitones = channelState.RpnDataMsb + channelState.RpnDataLsb / 128f;
             channelState.PitchBendRangeSemitones = Math.Clamp(semitones, 0f, 96f);
             UpdateChannelFrequencies(channel, channelState);
         }
@@ -941,12 +1315,247 @@ public sealed class OplSynth : IMidiSynth
         channelState.PortamentoRate = rate;
     }
 
+    private void ResetState()
+    {
+        _masterVolume = MasterVolumeDefault;
+        int defaultVolume = GetDefaultVolume();
+        float defaultBendRange = GetDefaultPitchBendRange();
+
+        for (int i = 0; i < _channels.Length; i++)
+        {
+            MidiChannelState channelState = _channels[i];
+            channelState.PitchBend = 8192;
+            channelState.PitchBendRangeSemitones = defaultBendRange;
+            channelState.Volume = defaultVolume;
+            channelState.Expression = 127;
+            channelState.Pan = 64;
+            channelState.Brightness = 127;
+            channelState.SustainPedal = false;
+            channelState.SostenutoPedal = false;
+            channelState.SoftPedal = false;
+            channelState.ModWheel = 0;
+            channelState.Aftertouch = 0;
+            Array.Clear(channelState.NoteAftertouch, 0, channelState.NoteAftertouch.Length);
+            channelState.RpnMsb = 127;
+            channelState.RpnLsb = 127;
+            channelState.RpnIsNrpn = false;
+            channelState.RpnDataMsb = 0;
+            channelState.RpnDataLsb = 0;
+            channelState.PortamentoValue = 0;
+            channelState.PortamentoEnabled = false;
+            channelState.PortamentoSourceNote = -1;
+            channelState.PortamentoRate = double.PositiveInfinity;
+            channelState.ModulationPhase = 0;
+            channelState.VibratoSpeedRad = ModulationSpeedRad;
+            channelState.VibratoDepthSemitonesPerUnit = VibratoDepthSemitonesPerUnit;
+            channelState.VibratoDelayUs = 0;
+
+            if ((_synthMode & SynthMode.Gs) != 0)
+            {
+                channelState.IsXgPercussion = false;
+            }
+
+            UpdateChannelGains(i, channelState);
+            UpdateChannelFrequencies(i, channelState);
+            UpdateChannelModulation(i, channelState);
+            AllNotesOff(i);
+        }
+    }
+
+    private bool ProcessUniversalSysEx(byte dev, bool realtime, ReadOnlySpan<byte> data)
+    {
+        bool deviceMatch = dev == SysExDeviceAll || dev == _sysExDeviceId;
+        if (data.Length < 2 || !deviceMatch)
+        {
+            return false;
+        }
+
+        int address = ((data[0] & 0x7F) << 8) | (data[1] & 0x7F);
+        ReadOnlySpan<byte> payload = data.Slice(2);
+
+        if (!realtime && address == 0x0901)
+        {
+            _synthMode = SynthMode.Gm;
+            ResetState();
+            return true;
+        }
+
+        if (!realtime && address == 0x0902)
+        {
+            _synthMode = SynthMode.Xg;
+            ResetState();
+            return true;
+        }
+
+        if (realtime && address == 0x0401 && payload.Length == 2)
+        {
+            int volume = (payload[0] & 0x7F) | ((payload[1] & 0x7F) << 7);
+            _masterVolume = (byte)(volume >> 7);
+            for (int i = 0; i < _channels.Length; i++)
+            {
+                UpdateChannelGains(i, _channels[i]);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool ProcessRolandSysEx(byte dev, ReadOnlySpan<byte> data)
+    {
+        bool deviceMatch = dev == SysExDeviceAll || (dev & 0x0F) == _sysExDeviceId;
+        if (data.Length < 6 || !deviceMatch)
+        {
+            return false;
+        }
+
+        byte model = (byte)(data[0] & 0x7F);
+        byte mode = (byte)(data[1] & 0x7F);
+        byte checksum = (byte)(data[^1] & 0x7F);
+        ReadOnlySpan<byte> payload = data.Slice(2, data.Length - 3);
+
+        int checkValue = 0;
+        for (int i = 0; i < payload.Length; i++)
+        {
+            checkValue += payload[i] & 0x7F;
+        }
+        checkValue = (128 - (checkValue & 127)) & 127;
+        if (checkValue != checksum)
+        {
+            return false;
+        }
+
+        int address = ((payload[0] & 0x7F) << 16) | ((payload[1] & 0x7F) << 8) | (payload[2] & 0x7F);
+        int targetChannel = 0;
+        if ((address & 0xFFF0FF) == 0x401015)
+        {
+            address = 0x401015;
+            targetChannel = payload[1] & 0x0F;
+        }
+
+        ReadOnlySpan<byte> commandData = payload.Slice(3);
+        if (mode != RolandModeSend)
+        {
+            return false;
+        }
+
+        switch ((model << 24) | address)
+        {
+            case (RolandModelGs << 24) | 0x00007F:
+            {
+                if (commandData.Length != 1 || (dev & 0xF0) != 0x10)
+                {
+                    break;
+                }
+
+                _synthMode = SynthMode.Gs;
+                ResetState();
+                return true;
+            }
+            case (RolandModelGs << 24) | 0x40007F:
+            {
+                if (commandData.Length != 1 || (dev & 0xF0) != 0x10)
+                {
+                    break;
+                }
+
+                _synthMode = SynthMode.Gs;
+                ResetState();
+                return true;
+            }
+            case (RolandModelGs << 24) | 0x401015:
+            {
+                if (commandData.Length != 1 || (dev & 0xF0) != 0x10)
+                {
+                    break;
+                }
+
+                if (_channels.Length < 16)
+                {
+                    break;
+                }
+
+                byte value = (byte)(commandData[0] & 0x7F);
+                int[] channelsMap =
+                {
+                    9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15
+                };
+                int midiChannel = channelsMap[Math.Clamp(targetChannel, 0, channelsMap.Length - 1)];
+                _channels[midiChannel].IsXgPercussion = value is 0x01 or 0x02;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ProcessYamahaSysEx(byte dev, ReadOnlySpan<byte> data)
+    {
+        bool deviceMatch = dev == SysExDeviceAll || (dev & 0x0F) == _sysExDeviceId;
+        if (data.Length < 1 || !deviceMatch)
+        {
+            return false;
+        }
+
+        byte model = (byte)(data[0] & 0x7F);
+        ReadOnlySpan<byte> payload = data.Slice(1);
+
+        switch ((model << 8) | (dev & 0xF0))
+        {
+            case (YamahaModelXg << 8) | 0x10:
+            {
+                if (payload.Length < 3)
+                {
+                    break;
+                }
+
+                int address = ((payload[0] & 0x7F) << 16) | ((payload[1] & 0x7F) << 8) | (payload[2] & 0x7F);
+                ReadOnlySpan<byte> commandData = payload.Slice(3);
+
+                if (address == 0x00007E && commandData.Length == 1)
+                {
+                    _synthMode = SynthMode.Xg;
+                    ResetState();
+                    return true;
+                }
+                break;
+            }
+        }
+
+        return false;
+    }
+
     private void ReleaseSustainedVoices(int channel)
     {
         foreach (OplVoice voice in _voices)
         {
             if (!voice.Active || voice.MidiChannel != channel || !voice.Sustained)
             {
+                continue;
+            }
+
+            if (voice.Sostenuto)
+            {
+                voice.Sustained = false;
+                continue;
+            }
+
+            KeyOffVoice(voice);
+        }
+    }
+
+    private void ReleaseSostenutoVoices(int channel)
+    {
+        foreach (OplVoice voice in _voices)
+        {
+            if (!voice.Active || voice.MidiChannel != channel || !voice.Sostenuto)
+            {
+                continue;
+            }
+
+            if (voice.Sustained)
+            {
+                voice.Sostenuto = false;
                 continue;
             }
 
@@ -963,21 +1572,27 @@ public sealed class OplSynth : IMidiSynth
                 continue;
             }
 
-            UpdateCarrierTotalLevel(voice, channelState);
-            if (TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
+            UpdateVoiceLevels(voice, channelState);
+            UpdateVoiceFeedback(voice, channelState);
+        }
+
+        if (IsPercussionChannel(channel) && _cores.Length > 0 && _cores[0].Registers.RhythmEnabled)
+        {
+            OplCore core = _cores[0];
+            for (int i = 0; i < _rhythmInstruments.Length; i++)
             {
-                OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
-                if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
-                    TryGetCore(voice.SecondaryOplChannel, out OplCore secondaryCore, out int secondaryLocalChannel) &&
-                    ReferenceEquals(core, secondaryCore))
+                if (_rhythmCounts[i] <= 0)
                 {
-                    WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
-                    WriteChannelFeedback(core, secondaryLocalChannel, channelState, instrument.FeedbackConnection2);
+                    continue;
                 }
-                else
+
+                OplInstrument? instrument = _rhythmInstruments[i];
+                if (instrument == null)
                 {
-                    WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+                    continue;
                 }
+
+                ConfigureRhythmOperators(core, channelState, _rhythmVelocities[i], (RhythmInstrument)i, instrument);
             }
         }
     }
@@ -1005,7 +1620,6 @@ public sealed class OplSynth : IMidiSynth
             }
 
             UpdateVoiceFrequency(voice, channelState);
-            UpdateCarrierTotalLevel(voice, channelState);
         }
     }
 
@@ -1065,10 +1679,11 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
+        Span<bool> channelHasNotes = stackalloc bool[_channels.Length];
         Span<bool> noteAftertouch = stackalloc bool[_channels.Length];
         foreach (OplVoice voice in _voices)
         {
-            if (!voice.Active || !voice.KeyOn || voice.NoteAftertouch <= 0)
+            if (!voice.Active)
             {
                 continue;
             }
@@ -1076,18 +1691,24 @@ public sealed class OplSynth : IMidiSynth
             int channel = voice.MidiChannel;
             if (channel >= 0 && channel < noteAftertouch.Length)
             {
-                noteAftertouch[channel] = true;
+                channelHasNotes[channel] = true;
+                if (voice.NoteAftertouch > 0)
+                {
+                    noteAftertouch[channel] = true;
+                }
             }
         }
 
         bool anyModulation = false;
-        double phaseStep = deltaSeconds * ModulationSpeedRad;
+        Span<bool> channelHasModulation = stackalloc bool[_channels.Length];
         for (int i = 0; i < _channels.Length; i++)
         {
             MidiChannelState channelState = _channels[i];
             bool hasModulation = channelState.ModWheel > 0 || channelState.Aftertouch > 0 || noteAftertouch[i];
-            if (hasModulation)
+            channelHasModulation[i] = hasModulation;
+            if (hasModulation && channelHasNotes[i])
             {
+                double phaseStep = deltaSeconds * channelState.VibratoSpeedRad;
                 channelState.ModulationPhase = AdvancePhase(channelState.ModulationPhase, phaseStep);
                 anyModulation = true;
             }
@@ -1115,14 +1736,13 @@ public sealed class OplSynth : IMidiSynth
                 continue;
             }
 
-            MidiChannelState channelState = _channels[channel];
-            if (GetModulationValue(channelState, voice) <= 0)
+            if (!channelHasModulation[channel])
             {
                 continue;
             }
 
+            MidiChannelState channelState = _channels[channel];
             UpdateVoiceFrequency(voice, channelState);
-            UpdateCarrierTotalLevel(voice, channelState);
         }
     }
 
@@ -1152,19 +1772,19 @@ public sealed class OplSynth : IMidiSynth
                 {
                     voice.KeyOnRemainingUs = Math.Max(0, voice.KeyOnRemainingUs - deltaUs);
                 }
-
-                if (voice.VibDelayUs <= long.MaxValue - deltaUs)
-                {
-                    voice.VibDelayUs += deltaUs;
-                }
-                else
-                {
-                    voice.VibDelayUs = long.MaxValue;
-                }
             }
             else if (voice.KeyOffRemainingUs > 0)
             {
                 voice.KeyOffRemainingUs = Math.Max(0, voice.KeyOffRemainingUs - deltaUs);
+            }
+
+            if (voice.VibDelayUs <= long.MaxValue - deltaUs)
+            {
+                voice.VibDelayUs += deltaUs;
+            }
+            else
+            {
+                voice.VibDelayUs = long.MaxValue;
             }
         }
     }
@@ -1382,6 +2002,7 @@ public sealed class OplSynth : IMidiSynth
     private void ApplyChannelRegisters(OplVoice voice, MidiChannelState channelState)
     {
         ConfigureChannelOperators(voice, channelState);
+        UpdateVoiceLevels(voice, channelState);
         UpdateVoiceFrequency(voice, channelState);
     }
 
@@ -1412,8 +2033,7 @@ public sealed class OplSynth : IMidiSynth
             WriteOperatorRegister(core, channel.ModulatorIndex, 0xE0, modulator1.Waveform);
 
             WriteOperatorRegister(core, channel.CarrierIndex, 0x20, carrier1.AmVibEgtKsrMult);
-            WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier1.KslTl, voice));
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x40, carrier1.KslTl);
             WriteOperatorRegister(core, channel.CarrierIndex, 0x60, carrier1.ArDr);
             WriteOperatorRegister(core, channel.CarrierIndex, 0x80, carrier1.SlRr);
             WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, carrier1.Waveform);
@@ -1425,8 +2045,7 @@ public sealed class OplSynth : IMidiSynth
             WriteOperatorRegister(core, secondaryChannel.ModulatorIndex, 0xE0, modulator2.Waveform);
 
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x20, carrier2.AmVibEgtKsrMult);
-            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl, voice));
+            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40, carrier2.KslTl);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x60, carrier2.ArDr);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x80, carrier2.SlRr);
             WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0xE0, carrier2.Waveform);
@@ -1436,8 +2055,9 @@ public sealed class OplSynth : IMidiSynth
             return;
         }
 
-        OplOperatorPatch carrier = GetOperatorPatch(instrument, 0, OplInstrumentDefaults.DefaultCarrier);
-        OplOperatorPatch modulator = GetOperatorPatch(instrument, 1, OplInstrumentDefaults.DefaultModulator);
+        int operatorOffset = voice.OperatorOffset;
+        OplOperatorPatch carrier = GetOperatorPatch(instrument, operatorOffset, OplInstrumentDefaults.DefaultCarrier);
+        OplOperatorPatch modulator = GetOperatorPatch(instrument, operatorOffset + 1, OplInstrumentDefaults.DefaultModulator);
 
         WriteOperatorRegister(core, channel.ModulatorIndex, 0x20, modulator.AmVibEgtKsrMult);
         WriteOperatorRegister(core, channel.ModulatorIndex, 0x40, modulator.KslTl);
@@ -1446,94 +2066,154 @@ public sealed class OplSynth : IMidiSynth
         WriteOperatorRegister(core, channel.ModulatorIndex, 0xE0, modulator.Waveform);
 
         WriteOperatorRegister(core, channel.CarrierIndex, 0x20, carrier.AmVibEgtKsrMult);
-        WriteOperatorRegister(core, channel.CarrierIndex, 0x40, ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl));
+        WriteOperatorRegister(core, channel.CarrierIndex, 0x40, carrier.KslTl);
         WriteOperatorRegister(core, channel.CarrierIndex, 0x60, carrier.ArDr);
         WriteOperatorRegister(core, channel.CarrierIndex, 0x80, carrier.SlRr);
         WriteOperatorRegister(core, channel.CarrierIndex, 0xE0, carrier.Waveform);
 
-        WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+        byte feedbackConnection = operatorOffset == 2 ? instrument.FeedbackConnection2 : instrument.FeedbackConnection1;
+        WriteChannelFeedback(core, localChannel, channelState, feedbackConnection);
     }
 
-    private void UpdateCarrierTotalLevel(OplVoice voice, MidiChannelState channelState)
+    private void UpdateVoiceLevels(OplVoice voice, MidiChannelState channelState)
     {
         if (!TryGetChannel(voice.OplChannel, out OplCore core, out _, out OplChannel channel))
         {
             return;
         }
 
-        OplOperatorPatch carrier = GetOperatorPatch(voice.Instrument, 0, OplInstrumentDefaults.DefaultCarrier);
-        WriteOperatorRegister(core, channel.CarrierIndex, 0x40,
-            ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier.KslTl, voice));
+        OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
+        bool isDrum = IsPercussionChannel(voice.MidiChannel);
+        byte brightness = GetScaledBrightness(channelState.Brightness);
+        byte velocity = (byte)Math.Clamp(voice.Velocity, 0, 127);
+        byte channelVolume = (byte)Math.Clamp(channelState.Volume, 0, 127);
+        byte channelExpression = (byte)Math.Clamp(channelState.Expression, 0, 127);
 
         if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
-            TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out _, out OplChannel secondaryChannel))
+            TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out _, out OplChannel secondaryChannel) &&
+            ReferenceEquals(core, secondaryCore))
         {
-            if (!ReferenceEquals(core, secondaryCore))
-            {
-                return;
-            }
+            int algoBits = (instrument.FeedbackConnection1 & 0x01) | ((instrument.FeedbackConnection2 & 0x01) << 1);
+            OplVoiceMode primaryMode = (OplVoiceMode)((int)OplVoiceMode.FourOp1_2FmFm + algoBits);
+            OplVoiceMode secondaryMode = (OplVoiceMode)((int)OplVoiceMode.FourOp3_4FmFm + algoBits);
 
-            OplOperatorPatch carrier2 = GetOperatorPatch(voice.Instrument, 2, OplInstrumentDefaults.DefaultCarrier);
-            WriteOperatorRegister(core, secondaryChannel.CarrierIndex, 0x40,
-                ComputeCarrierTotalLevel(channelState, voice.Velocity, carrier2.KslTl, voice));
+            ApplyVolumeToOperators(core, channel.ModulatorIndex, channel.CarrierIndex,
+                instrument, velocity, channelVolume, channelExpression, brightness, isDrum,
+                instrument.FeedbackConnection1, primaryMode);
+
+            ApplyVolumeToOperators(core, secondaryChannel.ModulatorIndex, secondaryChannel.CarrierIndex,
+                instrument, velocity, channelVolume, channelExpression, brightness, isDrum,
+                instrument.FeedbackConnection2, secondaryMode, operatorOffset: 2);
+            return;
         }
+
+        byte feedbackConnection = voice.OperatorOffset == 2 ? instrument.FeedbackConnection2 : instrument.FeedbackConnection1;
+        OplVoiceMode mode = (OplVoiceMode)((int)OplVoiceMode.TwoOpFm + (feedbackConnection & 0x01));
+        ApplyVolumeToOperators(core, channel.ModulatorIndex, channel.CarrierIndex,
+            instrument, velocity, channelVolume, channelExpression, brightness, isDrum,
+            feedbackConnection, mode, operatorOffset: voice.OperatorOffset);
     }
 
-    private byte ComputeCarrierTotalLevel(MidiChannelState channelState, int velocity, byte baseKslTl, OplVoice? voice = null)
+    private void ApplyVolumeToOperators(OplCore core, int modulatorIndex, int carrierIndex, OplInstrument instrument,
+        byte velocity, byte channelVolume, byte channelExpression, byte brightness, bool isDrum,
+        byte feedbackConnection, OplVoiceMode voiceMode, int operatorOffset = 0)
     {
-        float velocityGain = Math.Clamp(velocity / 127f, 0f, 1f);
-        float gain = velocityGain * GetChannelGain(channelState);
-        if (voice != null)
-        {
-            gain *= GetTremoloGain(channelState, voice);
-        }
-
-        gain = Math.Clamp(gain, 0f, 1f);
-        int attenuation = (int)Math.Round((1f - gain) * 63f);
-        int baseTl = baseKslTl & 0x3F;
-        int total = Math.Clamp(baseTl + attenuation, 0, 63);
-        return (byte)((baseKslTl & 0xC0) | total);
+        ComputeOperatorLevels(instrument, operatorOffset, feedbackConnection, voiceMode, velocity, channelVolume,
+            channelExpression, brightness, isDrum, out byte modTl, out byte carTl);
+        WriteOperatorRegister(core, modulatorIndex, 0x40, modTl);
+        WriteOperatorRegister(core, carrierIndex, 0x40, carTl);
     }
 
-    private void UpdateVoiceFrequency(OplVoice voice, MidiChannelState channelState)
+    private void ComputeOperatorLevels(OplInstrument instrument, int operatorOffset, byte feedbackConnection, OplVoiceMode voiceMode,
+        byte velocity, byte channelVolume, byte channelExpression, byte brightness, bool isDrum,
+        out byte modTl, out byte carTl)
+    {
+        OplOperatorPatch carrier = GetOperatorPatch(instrument, operatorOffset, OplInstrumentDefaults.DefaultCarrier);
+        OplOperatorPatch modulator = GetOperatorPatch(instrument, operatorOffset + 1, OplInstrumentDefaults.DefaultModulator);
+
+        bool doMod = DoOps[(int)voiceMode].DoMod;
+        bool doCar = DoOps[(int)voiceMode].DoCar;
+
+        OplVolumeContext volume = new OplVolumeContext
+        {
+            Velocity = velocity,
+            ChannelVolume = channelVolume,
+            ChannelExpression = channelExpression,
+            MasterVolume = _masterVolume,
+            VoiceMode = voiceMode,
+            FeedbackConnection = (byte)(feedbackConnection & 0x0F),
+            TlMod = (byte)(modulator.KslTl & 0x3F),
+            TlCar = (byte)(carrier.KslTl & 0x3F),
+            DoMod = doMod,
+            DoCar = doCar,
+            IsDrum = isDrum
+        };
+
+        OplModels.ApplyVolumeModel(_bankSet.VolumeModel, ref volume);
+        OplModels.ApplyBrightness(brightness, ref volume);
+
+        modTl = (byte)((modulator.KslTl & 0xC0) | (volume.TlMod & 0x3F));
+        carTl = (byte)((carrier.KslTl & 0xC0) | (volume.TlCar & 0x3F));
+    }
+
+    private void UpdateVoiceFeedback(OplVoice voice, MidiChannelState channelState)
     {
         if (!TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
         {
             return;
         }
 
-        double noteValue = voice.GlideActive ? voice.GlideCurrentNote : voice.OplNote;
-        noteValue += GetVibratoOffset(channelState, voice);
-        double frequency = GetFrequency(channelState, noteValue);
-        ComputeBlockAndFnum(frequency, out int block, out int fnum);
-        WriteFrequency(core, localChannel, fnum, block, voice.KeyOn);
+        OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
+        if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+            TryGetCore(voice.SecondaryOplChannel, out OplCore secondaryCore, out int secondaryLocalChannel) &&
+            ReferenceEquals(core, secondaryCore))
+        {
+            WriteChannelFeedback(core, localChannel, channelState, instrument.FeedbackConnection1);
+            WriteChannelFeedback(core, secondaryLocalChannel, channelState, instrument.FeedbackConnection2);
+            return;
+        }
+
+        byte feedbackConnection = voice.OperatorOffset == 2 ? instrument.FeedbackConnection2 : instrument.FeedbackConnection1;
+        WriteChannelFeedback(core, localChannel, channelState, feedbackConnection);
     }
 
-    private void SetChannelFrequency(int oplChannel, double note, MidiChannelState channelState, bool keyOn)
+    private void UpdateVoiceFrequency(OplVoice voice, MidiChannelState channelState)
     {
-        if (!TryGetCore(oplChannel, out OplCore core, out int localChannel))
+        if (voice.Sustained || voice.Sostenuto)
         {
             return;
         }
 
-        double frequency = GetFrequency(channelState, note);
-        ComputeBlockAndFnum(frequency, out int block, out int fnum);
-        WriteFrequency(core, localChannel, fnum, block, keyOn);
-    }
-
-    private void ComputeBlockAndFnum(double frequency, out int block, out int fnum)
-    {
-        double chipRate = OplTiming.GetChipSampleRateHz(_mode == OplSynthMode.Opl3 ? OplChipType.Opl3 : OplChipType.Opl2);
-        double baseValue = frequency * (1 << 20) / chipRate;
-        block = 0;
-        while (baseValue > 1023 && block < 7)
+        if (!TryGetCore(voice.OplChannel, out OplCore core, out int localChannel))
         {
-            baseValue /= 2.0;
-            block++;
+            return;
         }
 
-        fnum = (int)Math.Round(baseValue);
-        fnum = Math.Clamp(fnum, 0, 1023);
+        OplInstrument instrument = voice.Instrument ?? _bankSet.DefaultInstrument;
+        double baseNote = voice.GlideActive ? voice.GlideCurrentNote : voice.OplNote;
+        double tone = baseNote + GetPitchBendOffset(channelState) + GetVibratoOffset(channelState, voice);
+
+        double primaryTone = tone + GetNoteOffset(instrument, voice.OperatorOffset);
+        if (voice.OperatorOffset == 2 && (instrument.Flags & OplInstrumentFlags.PseudoFourOp) != 0)
+        {
+            primaryTone += GetSecondVoiceDetune(instrument);
+        }
+
+        ushort primaryToneValue = OplModels.ComputeTone(_bankSet.VolumeModel, primaryTone, out int primaryMulOffset);
+        DecodeTone(primaryToneValue, out int primaryFnum, out int primaryBlock);
+        WriteFrequency(core, localChannel, primaryFnum, primaryBlock, voice.KeyOn);
+        ApplyOperatorMultiples(core, voice.OplChannel, instrument, voice.OperatorOffset, primaryMulOffset);
+        voice.MulOffset = primaryMulOffset;
+
+        if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+            TryGetCore(voice.SecondaryOplChannel, out OplCore secondaryCore, out int secondaryLocalChannel))
+        {
+            double secondaryTone = tone + instrument.NoteOffset2;
+            ushort secondaryToneValue = OplModels.ComputeTone(_bankSet.VolumeModel, secondaryTone, out int secondaryMulOffset);
+            DecodeTone(secondaryToneValue, out int secondaryFnum, out int secondaryBlock);
+            WriteFrequency(secondaryCore, secondaryLocalChannel, secondaryFnum, secondaryBlock, voice.KeyOn);
+            ApplyOperatorMultiples(secondaryCore, voice.SecondaryOplChannel, instrument, operatorOffset: 2, secondaryMulOffset);
+        }
     }
 
     private void WriteFrequency(OplCore core, int channelIndex, int fnum, int block, bool keyOn)
@@ -1544,6 +2224,52 @@ public sealed class OplSynth : IMidiSynth
         core.WriteRegister(baseA0, (byte)(fnum & 0xFF));
         byte high = (byte)(((fnum >> 8) & 0x03) | ((block & 0x07) << 2) | (keyOn ? 0x20 : 0x00));
         core.WriteRegister(baseB0, high);
+    }
+
+    private void ApplyOperatorMultiples(OplCore core, int oplChannel, OplInstrument instrument, int operatorOffset, int mulOffset)
+    {
+        if (!TryGetChannel(oplChannel, out _, out _, out OplChannel channel))
+        {
+            return;
+        }
+
+        OplOperatorPatch carrier = GetOperatorPatch(instrument, operatorOffset, OplInstrumentDefaults.DefaultCarrier);
+        OplOperatorPatch modulator = GetOperatorPatch(instrument, operatorOffset + 1, OplInstrumentDefaults.DefaultModulator);
+        int offset = mulOffset;
+
+        ApplyOperatorMultiple(core, channel.ModulatorIndex, modulator.AmVibEgtKsrMult, ref offset);
+        ApplyOperatorMultiple(core, channel.CarrierIndex, carrier.AmVibEgtKsrMult, ref offset);
+    }
+
+    private void ApplyOperatorMultiple(OplCore core, int opIndex, byte baseValue, ref int mulOffset)
+    {
+        if (opIndex < 0)
+        {
+            return;
+        }
+
+        int dt = baseValue & 0xF0;
+        int mul = baseValue & 0x0F;
+        if (mulOffset > 0)
+        {
+            if (mul + mulOffset > 0x0F)
+            {
+                mulOffset = 0;
+                mul = 0x0F;
+            }
+            else
+            {
+                mul += mulOffset;
+            }
+        }
+
+        WriteOperatorRegister(core, opIndex, 0x20, (byte)(dt | (mul & 0x0F)));
+    }
+
+    private static void DecodeTone(ushort toneValue, out int fnum, out int block)
+    {
+        fnum = toneValue & 0x03FF;
+        block = (toneValue >> 10) & 0x07;
     }
 
     private void WriteChannelFeedback(OplCore core, int channelIndex, MidiChannelState channelState, byte feedbackConnection)
@@ -1614,6 +2340,34 @@ public sealed class OplSynth : IMidiSynth
         }
     }
 
+    private void MuteVoice(OplVoice voice)
+    {
+        if (!voice.Active)
+        {
+            return;
+        }
+
+        OplCore? primaryCore = null;
+        if (TryGetChannel(voice.OplChannel, out OplCore core, out int localChannel, out OplChannel channel))
+        {
+            primaryCore = core;
+            WriteFrequency(core, localChannel, channel.FNum, channel.Block, keyOn: false);
+            WriteOperatorRegister(core, channel.ModulatorIndex, 0x40, 0x3F);
+            WriteOperatorRegister(core, channel.CarrierIndex, 0x40, 0x3F);
+        }
+
+        if (voice.FourOp && voice.SecondaryOplChannel >= 0 &&
+            primaryCore != null &&
+            TryGetChannel(voice.SecondaryOplChannel, out OplCore secondaryCore, out _, out OplChannel secondaryChannel) &&
+            ReferenceEquals(primaryCore, secondaryCore))
+        {
+            WriteOperatorRegister(primaryCore, secondaryChannel.ModulatorIndex, 0x40, 0x3F);
+            WriteOperatorRegister(primaryCore, secondaryChannel.CarrierIndex, 0x40, 0x3F);
+        }
+
+        DeactivateVoice(voice);
+    }
+
     private void BeginVoiceRelease(OplVoice voice)
     {
         OplInstrument source = voice.Instrument ?? _bankSet.DefaultInstrument;
@@ -1646,12 +2400,15 @@ public sealed class OplSynth : IMidiSynth
         voice.Active = false;
         voice.KeyOn = false;
         voice.Sustained = false;
+        voice.Sostenuto = false;
         voice.FourOp = false;
         voice.SecondaryOplChannel = -1;
         voice.KeyOnRemainingUs = 0;
         voice.KeyOffRemainingUs = 0;
         voice.VibDelayUs = 0;
         voice.NoteAftertouch = 0;
+        voice.MulOffset = 0;
+        voice.OperatorOffset = 0;
         voice.GlideActive = false;
         voice.GlideCurrentNote = 0;
         voice.GlideTargetNote = 0;
@@ -1665,7 +2422,17 @@ public sealed class OplSynth : IMidiSynth
 
     private bool IsPercussionChannel(int channel)
     {
-        return channel == PercussionChannel;
+        if (channel == PercussionChannel)
+        {
+            return true;
+        }
+
+        if (!IsValidChannel(channel))
+        {
+            return false;
+        }
+
+        return _channels[channel].IsXgPercussion;
     }
 
     private static bool IsFourOpInstrument(OplInstrument instrument)
@@ -1673,15 +2440,31 @@ public sealed class OplSynth : IMidiSynth
         return (instrument.Flags & OplInstrumentFlags.FourOp) != 0;
     }
 
+    private static bool IsPseudoFourOpInstrument(OplInstrument instrument)
+    {
+        return (instrument.Flags & OplInstrumentFlags.PseudoFourOp) != 0;
+    }
+
     private bool TryResolveMelodicInstrument(MidiChannelState channelState, int note, int velocity,
         out OplInstrument instrument, out int oplNote, out int adjustedVelocity)
     {
-        instrument = _bankSet.GetMelodic(channelState.BankMsb, channelState.BankLsb, channelState.Program);
+        byte bankMsb = channelState.BankMsb;
+        byte bankLsb = channelState.BankLsb;
+        int program = channelState.Program;
+
+        instrument = _bankSet.GetMelodic(bankMsb, bankLsb, program);
         instrument ??= _bankSet.DefaultInstrument;
 
-        if (instrument.IsBlank && channelState.BankLsb != 0)
+        if (instrument.IsBlank && bankLsb != 0)
         {
-            instrument = _bankSet.GetMelodic(channelState.BankMsb, 0, channelState.Program);
+            instrument = _bankSet.GetMelodic(bankMsb, 0, program);
+            instrument ??= _bankSet.DefaultInstrument;
+        }
+
+        if (instrument.IsBlank && (bankMsb != 0 || bankLsb != 0))
+        {
+            instrument = _bankSet.GetMelodic(0, 0, program);
+            instrument ??= _bankSet.DefaultInstrument;
         }
 
         if (instrument.IsBlank)
@@ -1703,9 +2486,17 @@ public sealed class OplSynth : IMidiSynth
         instrument = _bankSet.GetPercussion(bankMsb, bankLsb, note);
         instrument ??= _bankSet.DefaultInstrument;
 
-        if (instrument.IsBlank && bankLsb != 0)
+        byte fallbackLsb = (byte)(bankLsb & 0x80);
+        if (instrument.IsBlank && fallbackLsb != bankLsb)
         {
-            instrument = _bankSet.GetPercussion(bankMsb, 0, note);
+            instrument = _bankSet.GetPercussion(bankMsb, fallbackLsb, note);
+            instrument ??= _bankSet.DefaultInstrument;
+        }
+
+        if (instrument.IsBlank && (bankMsb != 0 || bankLsb != 0))
+        {
+            instrument = _bankSet.GetPercussion(0, 0, note);
+            instrument ??= _bankSet.DefaultInstrument;
         }
 
         if (instrument.IsBlank)
@@ -1733,15 +2524,14 @@ public sealed class OplSynth : IMidiSynth
 
     private void ResolvePercussionBank(MidiChannelState channelState, out byte bankMsb, out byte bankLsb)
     {
-        if (channelState.Program != 0)
+        int bank = channelState.Program;
+        if ((_synthMode & SynthMode.Xg) != 0 && channelState.BankMsb == 0x7E)
         {
-            bankMsb = 0;
-            bankLsb = (byte)channelState.Program;
-            return;
+            bank += 128;
         }
 
-        bankMsb = channelState.BankMsb;
-        bankLsb = channelState.BankLsb;
+        bankMsb = (byte)((bank >> 8) & 0xFF);
+        bankLsb = (byte)(bank & 0xFF);
     }
 
     private static int AdjustNote(int note, OplInstrument instrument, bool isPercussion)
@@ -1750,9 +2540,11 @@ public sealed class OplSynth : IMidiSynth
         if ((isPercussion || instrument.IsFixedNote) && instrument.PercussionKeyNumber != 0)
         {
             tone = instrument.PercussionKeyNumber;
+            if (tone >= 128)
+            {
+                tone -= 128;
+            }
         }
-
-        tone += instrument.NoteOffset1;
         return tone;
     }
 
@@ -1809,6 +2601,9 @@ public sealed class OplSynth : IMidiSynth
             _rhythmCounts[instrumentIndex]++;
         }
 
+        _rhythmInstruments[instrumentIndex] = instrument;
+        _rhythmVelocities[instrumentIndex] = velocity;
+
         int noteIndex = Math.Clamp(note, 0, _rhythmNoteMap.Length - 1);
         if (_rhythmNoteCounts[noteIndex] < int.MaxValue)
         {
@@ -1855,6 +2650,8 @@ public sealed class OplSynth : IMidiSynth
 
         if (_rhythmCounts[instrumentIndex] == 0)
         {
+            _rhythmInstruments[instrumentIndex] = null;
+            _rhythmVelocities[instrumentIndex] = 0;
             SetRhythmFlag(core, instrument, enable: false);
         }
 
@@ -1874,6 +2671,8 @@ public sealed class OplSynth : IMidiSynth
         Array.Clear(_rhythmCounts, 0, _rhythmCounts.Length);
         Array.Clear(_rhythmNoteCounts, 0, _rhythmNoteCounts.Length);
         Array.Clear(_rhythmNoteMap, 0, _rhythmNoteMap.Length);
+        Array.Clear(_rhythmInstruments, 0, _rhythmInstruments.Length);
+        Array.Clear(_rhythmVelocities, 0, _rhythmVelocities.Length);
         DisableRhythmMode(_cores[0]);
     }
 
@@ -1960,47 +2759,59 @@ public sealed class OplSynth : IMidiSynth
     {
         OplOperatorPatch carrier = GetOperatorPatch(patch, 0, OplInstrumentDefaults.DefaultCarrier);
         OplOperatorPatch modulator = GetOperatorPatch(patch, 1, OplInstrumentDefaults.DefaultModulator);
-        byte carrierTl = ComputeCarrierTotalLevel(channelState, velocity, carrier.KslTl);
+        byte channelVolume = (byte)Math.Clamp(channelState.Volume, 0, 127);
+        byte channelExpression = (byte)Math.Clamp(channelState.Expression, 0, 127);
+        byte brightness = GetScaledBrightness(channelState.Brightness);
+        byte velocityValue = (byte)Math.Clamp(velocity, 0, 127);
+        byte feedbackConnection = patch.FeedbackConnection1;
+        OplVoiceMode voiceMode = (OplVoiceMode)((int)OplVoiceMode.TwoOpFm + (feedbackConnection & 0x01));
+        if (instrument != RhythmInstrument.BassDrum)
+        {
+            voiceMode = OplVoiceMode.TwoOpAm;
+        }
+
+        ComputeOperatorLevels(patch, operatorOffset: 0, feedbackConnection, voiceMode, velocityValue, channelVolume,
+            channelExpression, brightness, isDrum: true, out byte modTl, out byte carTl);
 
         switch (instrument)
         {
             case RhythmInstrument.BassDrum:
                 WriteOperatorRegister(core, RhythmOpBdMod, 0x20, modulator.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpBdMod, 0x40, modulator.KslTl);
+                WriteOperatorRegister(core, RhythmOpBdMod, 0x40, modTl);
                 WriteOperatorRegister(core, RhythmOpBdMod, 0x60, modulator.ArDr);
                 WriteOperatorRegister(core, RhythmOpBdMod, 0x80, modulator.SlRr);
                 WriteOperatorRegister(core, RhythmOpBdMod, 0xE0, modulator.Waveform);
 
                 WriteOperatorRegister(core, RhythmOpBdCar, 0x20, carrier.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpBdCar, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpBdCar, 0x40, carTl);
                 WriteOperatorRegister(core, RhythmOpBdCar, 0x60, carrier.ArDr);
                 WriteOperatorRegister(core, RhythmOpBdCar, 0x80, carrier.SlRr);
                 WriteOperatorRegister(core, RhythmOpBdCar, 0xE0, carrier.Waveform);
                 break;
             case RhythmInstrument.Snare:
                 WriteOperatorRegister(core, RhythmOpSd, 0x20, carrier.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpSd, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpSd, 0x40, carTl);
                 WriteOperatorRegister(core, RhythmOpSd, 0x60, carrier.ArDr);
                 WriteOperatorRegister(core, RhythmOpSd, 0x80, carrier.SlRr);
                 WriteOperatorRegister(core, RhythmOpSd, 0xE0, carrier.Waveform);
                 break;
             case RhythmInstrument.Tom:
                 WriteOperatorRegister(core, RhythmOpTom, 0x20, carrier.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpTom, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpTom, 0x40, carTl);
                 WriteOperatorRegister(core, RhythmOpTom, 0x60, carrier.ArDr);
                 WriteOperatorRegister(core, RhythmOpTom, 0x80, carrier.SlRr);
                 WriteOperatorRegister(core, RhythmOpTom, 0xE0, carrier.Waveform);
                 break;
             case RhythmInstrument.Cymbal:
                 WriteOperatorRegister(core, RhythmOpTc, 0x20, carrier.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpTc, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpTc, 0x40, carTl);
                 WriteOperatorRegister(core, RhythmOpTc, 0x60, carrier.ArDr);
                 WriteOperatorRegister(core, RhythmOpTc, 0x80, carrier.SlRr);
                 WriteOperatorRegister(core, RhythmOpTc, 0xE0, carrier.Waveform);
                 break;
             case RhythmInstrument.HiHat:
                 WriteOperatorRegister(core, RhythmOpHh, 0x20, carrier.AmVibEgtKsrMult);
-                WriteOperatorRegister(core, RhythmOpHh, 0x40, carrierTl);
+                WriteOperatorRegister(core, RhythmOpHh, 0x40, carTl);
                 WriteOperatorRegister(core, RhythmOpHh, 0x60, carrier.ArDr);
                 WriteOperatorRegister(core, RhythmOpHh, 0x80, carrier.SlRr);
                 WriteOperatorRegister(core, RhythmOpHh, 0xE0, carrier.Waveform);
@@ -2037,8 +2848,9 @@ public sealed class OplSynth : IMidiSynth
             _ => 6
         };
 
-        double frequency = GetFrequency(channelState, note);
-        ComputeBlockAndFnum(frequency, out int block, out int fnum);
+        double tone = note + GetPitchBendOffset(channelState);
+        ushort toneValue = OplModels.ComputeTone(_bankSet.VolumeModel, tone, out _);
+        DecodeTone(toneValue, out int fnum, out int block);
         WriteFrequency(core, channelIndex, fnum, block, keyOn: false);
     }
 
@@ -2125,10 +2937,10 @@ public sealed class OplSynth : IMidiSynth
     {
         return _bankSet.VolumeModel switch
         {
-            VolumeModelHmi => ChannelAllocMode.AnyReleased,
-            VolumeModelHmiOld => ChannelAllocMode.AnyReleased,
-            VolumeModelMsAdlib => ChannelAllocMode.SameInstrument,
-            VolumeModelImfCreator => ChannelAllocMode.SameInstrument,
+            OplVolumeModel.Hmi => ChannelAllocMode.AnyReleased,
+            OplVolumeModel.HmiOld => ChannelAllocMode.AnyReleased,
+            OplVolumeModel.MsAdlib => ChannelAllocMode.SameInstrument,
+            OplVolumeModel.ImfCreator => ChannelAllocMode.SameInstrument,
             _ => ChannelAllocMode.OffDelay
         };
     }
@@ -2435,11 +3247,6 @@ public sealed class OplSynth : IMidiSynth
 
     private int GetModulationValue(MidiChannelState channelState, OplVoice voice)
     {
-        if (!voice.KeyOn || IsPercussionChannel(voice.MidiChannel))
-        {
-            return 0;
-        }
-
         int value = channelState.ModWheel;
         if (channelState.Aftertouch > value)
         {
@@ -2457,61 +3264,63 @@ public sealed class OplSynth : IMidiSynth
     private double GetVibratoOffset(MidiChannelState channelState, OplVoice voice)
     {
         int modulation = GetModulationValue(channelState, voice);
-        if (modulation <= 0)
+        if (modulation <= 0 || voice.VibDelayUs < channelState.VibratoDelayUs)
         {
             return 0.0;
         }
 
-        return modulation * VibratoDepthSemitonesPerUnit * Math.Sin(channelState.ModulationPhase);
+        return modulation * channelState.VibratoDepthSemitonesPerUnit * Math.Sin(channelState.ModulationPhase);
     }
 
-    private float GetTremoloGain(MidiChannelState channelState, OplVoice voice)
-    {
-        int modulation = GetModulationValue(channelState, voice);
-        if (modulation <= 0)
-        {
-            return 1f;
-        }
-
-        float depth = (float)(modulation * TremoloDepthPerUnit);
-        float lfo = (float)Math.Sin(channelState.ModulationPhase);
-        float amount = 0.5f + 0.5f * lfo;
-        return Math.Clamp(1f - depth * amount, 0f, 1f);
-    }
-
-    private double GetFrequency(MidiChannelState channelState, double note)
+    private static double GetPitchBendOffset(MidiChannelState channelState)
     {
         double bend = (channelState.PitchBend - 8192) / 8192.0;
-        double bendSemitones = bend * channelState.PitchBendRangeSemitones;
-        double noteValue = note + bendSemitones;
-        return 440.0 * Math.Pow(2.0, (noteValue - 69.0) / 12.0);
+        return bend * channelState.PitchBendRangeSemitones;
     }
 
-    private static float GetChannelGain(MidiChannelState channelState)
+    private static double GetNoteOffset(OplInstrument instrument, int operatorOffset)
     {
-        float volume = Math.Clamp(channelState.Volume / 127f, 0f, 1f);
-        float expression = Math.Clamp(channelState.Expression / 127f, 0f, 1f);
-        return volume * expression;
+        return operatorOffset == 2 ? instrument.NoteOffset2 : instrument.NoteOffset1;
+    }
+
+    private static double GetSecondVoiceDetune(OplInstrument instrument)
+    {
+        int detune = instrument.SecondVoiceDetune;
+        if (detune == 0)
+        {
+            return 0.0;
+        }
+
+        int fine = ((detune + 128) >> 1) - 64;
+        return fine / 32.0;
+    }
+
+    private static byte GetScaledBrightness(int brightness)
+    {
+        int clamped = Math.Clamp(brightness, 0, 127);
+        if (clamped >= 64)
+        {
+            return 127;
+        }
+
+        return (byte)(clamped * 2);
     }
 
     private static (bool left, bool right) GetPanFlags(MidiChannelState channelState)
     {
         int pan = Math.Clamp(channelState.Pan, 0, 127);
-        if (pan <= 42)
-        {
-            return (true, false);
-        }
-
-        if (pan >= 85)
-        {
-            return (false, true);
-        }
-
-        return (true, true);
+        bool left = pan < 80;
+        bool right = pan >= 48;
+        return (left, right);
     }
 
     private static bool IsValidChannel(int channel)
     {
         return channel >= 0 && channel < 16;
+    }
+
+    private static bool IsXgPercussionBank(MidiChannelState channelState)
+    {
+        return channelState.BankMsb == 0x7E || channelState.BankMsb == 0x7F;
     }
 }

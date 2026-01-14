@@ -4,9 +4,9 @@ namespace OpenMIDI.Tests;
 
 public sealed class OplSynthAllocatorGoodnessTests
 {
-    private const byte VolumeModelAuto = 0;
-    private const byte VolumeModelHmi = 10;
-    private const byte VolumeModelMsAdlib = 12;
+    private const OplVolumeModel VolumeModelAuto = OplVolumeModel.Generic;
+    private const OplVolumeModel VolumeModelHmi = OplVolumeModel.HmiOld;
+    private const OplVolumeModel VolumeModelMsAdlib = OplVolumeModel.MsAdlib;
 
     [Fact]
     public void Allocator_OffDelayPrefersFreeChannel()
@@ -58,7 +58,7 @@ public sealed class OplSynthAllocatorGoodnessTests
         Assert.Equal(reuseBefore + 1, synth.ReleaseReuseCount);
     }
 
-    private static OplInstrumentBankSet CreateBank(byte volumeModel, ushort delayOffMs)
+    private static OplInstrumentBankSet CreateBank(OplVolumeModel volumeModel, ushort delayOffMs)
     {
         OplOperatorPatch modulator = new OplOperatorPatch(
             amVibEgtKsrMult: 0x21,
@@ -99,6 +99,6 @@ public sealed class OplSynthAllocatorGoodnessTests
         OplBank melodicBank = new OplBank("AllocMelodic", 0, 0, melodic);
         OplBank percussionBank = new OplBank("AllocPercussion", 0, 0, percussion);
         return new OplInstrumentBankSet(new[] { melodicBank }, new[] { percussionBank },
-            deepTremolo: false, deepVibrato: false, volumeModel: volumeModel);
+            deepTremolo: false, deepVibrato: false, volumeModel: volumeModel, mt32Defaults: false);
     }
 }

@@ -86,6 +86,10 @@ public sealed class MidiPlayerTests
         {
         }
 
+        public void SysEx(ReadOnlySpan<byte> data)
+        {
+        }
+
         public void Render(float[] interleaved, int offset, int frames, int sampleRate)
         {
             if (frames <= 0)

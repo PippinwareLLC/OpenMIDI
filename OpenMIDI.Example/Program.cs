@@ -392,6 +392,11 @@ public static class Program
             Synth.PitchBend(channel, value);
         }
 
+        public void SysEx(ReadOnlySpan<byte> data)
+        {
+            Synth.SysEx(data);
+        }
+
         public void Render(float[] interleaved, int offset, int frames, int sampleRate)
         {
             Synth.Render(interleaved, offset, frames, sampleRate);

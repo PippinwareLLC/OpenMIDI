@@ -1,0 +1,41 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenMIDI", "OpenMIDI.csproj", "{B38B053A-26F4-6A96-6F80-AAE29149C1C8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenMIDI.Example", "OpenMIDI.Example\OpenMIDI.Example.csproj", "{D8C66111-1092-9955-D55A-AC505BC2C334}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05-4346-4AA6-1389-037BE0695223}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenMIDI.Tests", "tests\OpenMIDI.Tests\OpenMIDI.Tests.csproj", "{B6B2D8E5-765C-F64E-7969-1BBCD2275425}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B38B053A-26F4-6A96-6F80-AAE29149C1C8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B38B053A-26F4-6A96-6F80-AAE29149C1C8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B38B053A-26F4-6A96-6F80-AAE29149C1C8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B38B053A-26F4-6A96-6F80-AAE29149C1C8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D8C66111-1092-9955-D55A-AC505BC2C334}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D8C66111-1092-9955-D55A-AC505BC2C334}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D8C66111-1092-9955-D55A-AC505BC2C334}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D8C66111-1092-9955-D55A-AC505BC2C334}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B6B2D8E5-765C-F64E-7969-1BBCD2275425}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6B2D8E5-765C-F64E-7969-1BBCD2275425}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6B2D8E5-765C-F64E-7969-1BBCD2275425}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6B2D8E5-765C-F64E-7969-1BBCD2275425}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{B6B2D8E5-765C-F64E-7969-1BBCD2275425} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E1AAC667-18C1-4002-B315-F884709656B1}
+	EndGlobalSection
+EndGlobal

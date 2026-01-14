@@ -110,20 +110,22 @@ public sealed class OplBank
 public sealed class OplInstrumentBankSet
 {
     public OplInstrumentBankSet(IReadOnlyList<OplBank> melodicBanks, IReadOnlyList<OplBank> percussionBanks,
-        bool deepTremolo, bool deepVibrato, byte volumeModel)
+        bool deepTremolo, bool deepVibrato, OplVolumeModel volumeModel, bool mt32Defaults)
     {
         MelodicBanks = melodicBanks;
         PercussionBanks = percussionBanks;
         DeepTremolo = deepTremolo;
         DeepVibrato = deepVibrato;
         VolumeModel = volumeModel;
+        Mt32Defaults = mt32Defaults;
     }
 
     public IReadOnlyList<OplBank> MelodicBanks { get; }
     public IReadOnlyList<OplBank> PercussionBanks { get; }
     public bool DeepTremolo { get; }
     public bool DeepVibrato { get; }
-    public byte VolumeModel { get; }
+    public OplVolumeModel VolumeModel { get; }
+    public bool Mt32Defaults { get; }
     public OplInstrument DefaultInstrument => MelodicBanks.Count > 0 ? MelodicBanks[0].Instruments[0] : OplInstrumentDefaults.DefaultInstrument;
 
     public static OplInstrumentBankSet CreateDefault()
@@ -139,7 +141,8 @@ public sealed class OplInstrumentBankSet
 
         OplBank melodicBank = new OplBank("Default", 0, 0, melodic);
         OplBank percussionBank = new OplBank("DefaultDrums", 0, 0, percussion);
-        return new OplInstrumentBankSet(new[] { melodicBank }, new[] { percussionBank }, deepTremolo: false, deepVibrato: false, volumeModel: 0);
+        return new OplInstrumentBankSet(new[] { melodicBank }, new[] { percussionBank }, deepTremolo: false,
+            deepVibrato: false, volumeModel: OplVolumeModel.Generic, mt32Defaults: false);
     }
 
     public OplInstrument GetMelodic(byte bankMsb, byte bankLsb, int program)
@@ -265,7 +268,11 @@ public static class WoplBankLoader
 
         bool deepTremolo = (oplFlags & 0x01) != 0;
         bool deepVibrato = (oplFlags & 0x02) != 0;
-        return new OplInstrumentBankSet(melodicBanks, percussionBanks, deepTremolo, deepVibrato, volumeModel);
+        bool mt32Defaults = (oplFlags & 0x04) != 0;
+        OplVolumeModel model = volumeModel <= (byte)OplVolumeModel.Rsxx
+            ? (OplVolumeModel)volumeModel
+            : OplVolumeModel.Generic;
+        return new OplInstrumentBankSet(melodicBanks, percussionBanks, deepTremolo, deepVibrato, model, mt32Defaults);
     }
 
     private static OplBank ReadBankHeader(ReadOnlySpan<byte> data, ref int offset)

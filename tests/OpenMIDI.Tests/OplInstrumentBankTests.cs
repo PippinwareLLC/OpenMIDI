@@ -15,7 +15,7 @@ public sealed class OplInstrumentBankTests
 
         Assert.True(bankSet.DeepTremolo);
         Assert.True(bankSet.DeepVibrato);
-        Assert.Equal(5, bankSet.VolumeModel);
+        Assert.Equal(OplVolumeModel.DmxFixed, bankSet.VolumeModel);
 
         OplBank melodic = bankSet.MelodicBanks[0];
         Assert.Equal("MelBank", melodic.Name);
@@ -76,7 +76,8 @@ public sealed class OplInstrumentBankTests
             new[] { new OplBank("Drums", 0, 0, percussion) },
             deepTremolo: true,
             deepVibrato: true,
-            volumeModel: 0);
+            volumeModel: OplVolumeModel.Generic,
+            mt32Defaults: false);
 
         OplSynth synth = new OplSynth(OplSynthMode.Opl2);
         synth.LoadBank(bankSet);

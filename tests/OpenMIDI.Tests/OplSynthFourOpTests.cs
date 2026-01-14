@@ -88,6 +88,6 @@ public sealed class OplSynthFourOpTests
         OplBank melodicBank = new OplBank("FourOpMelodic", 0, 0, melodic);
         OplBank percussionBank = new OplBank("FourOpPercussion", 0, 0, percussion);
         return new OplInstrumentBankSet(new[] { melodicBank }, new[] { percussionBank },
-            deepTremolo: false, deepVibrato: false, volumeModel: 0);
+            deepTremolo: false, deepVibrato: false, volumeModel: OplVolumeModel.Generic, mt32Defaults: false);
     }
 }

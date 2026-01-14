@@ -5,3 +5,5 @@ bin/
 obj/
 .vs/
 *.mid
+.conductor/
+jobs/

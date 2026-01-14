@@ -3,6 +3,7 @@ namespace OpenMIDI.Synth;
 public interface IMidiSynth
 {
     void Reset();
+    void SysEx(ReadOnlySpan<byte> data);
     void NoteOn(int channel, int note, int velocity);
     void NoteOff(int channel, int note, int velocity);
     void PolyAftertouch(int channel, int note, int pressure);

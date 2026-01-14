@@ -63,7 +63,7 @@ public sealed class MidiPlayer
                 continue;
             }
 
-            if (midiEvent.Kind == MidiEventKind.Meta || midiEvent.Kind == MidiEventKind.SysEx)
+            if (midiEvent.Kind == MidiEventKind.Meta)
             {
                 continue;
             }
@@ -144,6 +144,9 @@ public sealed class MidiPlayer
     {
         switch (midiEvent.Kind)
         {
+            case MidiEventKind.SysEx:
+                DispatchSysEx(midiEvent.MetaData);
+                break;
             case MidiEventKind.NoteOn:
                 _synth.NoteOn(midiEvent.Channel, midiEvent.Data1, midiEvent.Data2);
                 break;
@@ -169,5 +172,40 @@ public sealed class MidiPlayer
                 break;
             }
         }
+    }
+
+    private void DispatchSysEx(byte[]? data)
+    {
+        if (data == null || data.Length == 0)
+        {
+            return;
+        }
+
+        bool hasStart = data[0] == 0xF0;
+        bool hasEnd = data[data.Length - 1] == 0xF7;
+        if (hasStart && hasEnd)
+        {
+            _synth.SysEx(data);
+            return;
+        }
+
+        int extraStart = hasStart ? 0 : 1;
+        int extraEnd = hasEnd ? 0 : 1;
+        int length = data.Length + extraStart + extraEnd;
+        Span<byte> buffer = length <= 256 ? stackalloc byte[length] : new byte[length];
+        int index = 0;
+        if (extraStart == 1)
+        {
+            buffer[index++] = 0xF0;
+        }
+
+        data.AsSpan().CopyTo(buffer.Slice(index));
+        index += data.Length;
+        if (extraEnd == 1)
+        {
+            buffer[index] = 0xF7;
+        }
+
+        _synth.SysEx(buffer);
     }
 }

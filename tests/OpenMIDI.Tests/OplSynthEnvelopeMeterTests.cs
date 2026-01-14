@@ -78,6 +78,6 @@ public sealed class OplSynthEnvelopeMeterTests
         OplBank melodicBank = new OplBank("TestMelodic", 0, 0, melodic);
         OplBank percussionBank = new OplBank("TestPercussion", 0, 0, percussion);
         return new OplInstrumentBankSet(new[] { melodicBank }, new[] { percussionBank },
-            deepTremolo: false, deepVibrato: false, volumeModel: 0);
+            deepTremolo: false, deepVibrato: false, volumeModel: OplVolumeModel.Generic, mt32Defaults: false);
     }
 }
