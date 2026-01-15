@@ -56,9 +56,9 @@ dotnet run --project OpenMIDI/OpenMIDI.Example -- --file path\to\song.mid --gain
 ```
 
 ## Parity Matrix (Target: Adlib/Sound Blaster)
-This matrix tracks parity goals for OPL1/OPL2/OPL3 behavior. The current synth
-is a stub, so these are largely unchecked until the register-accurate core
-lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
+This matrix tracks parity goals for OPL1/OPL2/OPL3 behavior as implemented in
+OpenMIDI. OplSynth currently exposes OPL2/OPL3 playback; OPL1 support is
+core-level only for now. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 
 | Feature | OPL1 | OPL2 | OPL3 |
 | --- | --- | --- | --- |
@@ -67,17 +67,23 @@ lands. Detailed milestones live in `OpenMIDI/MILESTONES.MD`.
 | Timer A/B counters and IRQ status | [x] | [x] | [x] |
 | Operator envelopes (attack/decay/sustain/release) | [x] | [x] | [x] |
 | Key scale level/rate | [x] | [x] | [x] |
-| Waveform selection | [x] | [x] | [x] |
+| Waveform selection | [ ] | [x] | [x] |
 | Tremolo/vibrato LFOs | [x] | [x] | [x] |
 | 2-operator algorithms and feedback | [x] | [x] | [x] |
 | Rhythm mode (BD/SD/TT/CY/HH) | [ ] | [x] | [x] |
-| 4-operator channel pairing | [ ] | [ ] | [ ] |
+| 4-operator channel pairing and algorithms | [ ] | [ ] | [x] |
 | Stereo output routing | [ ] | [ ] | [x] |
-| MIDI instrument bank mapping | [ ] | [x] | [x] |
-| MIDI percussion mapping | [ ] | [x] | [x] |
-| Pitch bend and controller mapping (volume/expression/pan/sustain) | [x] | [x] | [x] |
-| Mod wheel/vibrato controller mapping | [ ] | [x] | [x] |
+| Pseudo-4op (dual 2-op voice mode) | [ ] | [x] | [x] |
+| MIDI instrument bank mapping (WOPL) | [ ] | [x] | [x] |
+| MIDI percussion mapping (channel 10 -> rhythm) | [ ] | [x] | [x] |
+| Pitch bend + RPN pitch bend range | [ ] | [x] | [x] |
+| CC mapping (volume/expression/pan/sustain/sostenuto/soft/brightness) | [ ] | [x] | [x] |
+| Mod wheel + aftertouch vibrato/tremolo | [ ] | [x] | [x] |
+| Portamento glide (CC65/5/37) | [ ] | [x] | [x] |
+| GM/GS/XG SysEx handling + XG drum banks | [ ] | [x] | [x] |
+| Volume model curves (DMX/Apogee/Win9x/HMI/etc) | [ ] | [x] | [x] |
 | Envelope rate table validation (ymfm) | [x] | [x] | [x] |
+| Reference render clip tests | [ ] | [x] | [x] |
 | Register-level verification vs reference core | [ ] | [ ] | [ ] |
 
 ## License
